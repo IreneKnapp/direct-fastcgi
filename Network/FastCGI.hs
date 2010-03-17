@@ -7,9 +7,8 @@ module Main (
              FastCGIState,
              getFastCGIState,
              
-             -- * Accepting connections
+             -- * Accepting requests
              acceptLoop,
-             concurrentAcceptLoop,
              
              -- * Logging
              logFastCGI
@@ -56,47 +55,66 @@ instance FastCGIMonad FastCGI where
     getFastCGIState = ask
 
 
+data Record = Record {
+      recordType :: RecordType,
+      recordRequestID :: Int,
+      recordContent :: BS.ByteString
+    } deriving (Show)
+
+
+data RecordType = BeginRequestRecord
+                | AbortRequestRecord
+                | EndRequestRecord
+                | ParamsRecord
+                | StdinRecord
+                | StdoutRecord
+                | StderrRecord
+                | DataRecord
+                | GetValuesRecord
+                | GetValuesResultRecord
+                  deriving (Eq, Show)
+instance Enum RecordType where
+    toEnum 1 = BeginRequestRecord
+    toEnum 2 = AbortRequestRecord
+    toEnum 3 = EndRequestRecord
+    toEnum 4 = ParamsRecord
+    toEnum 5 = StdinRecord
+    toEnum 6 = StdoutRecord
+    toEnum 7 = StderrRecord
+    toEnum 8 = DataRecord
+    toEnum 9 = GetValuesRecord
+    toEnum 10 = GetValuesResultRecord
+    fromEnum BeginRequestRecord = 1
+    fromEnum AbortRequestRecord = 2
+    fromEnum EndRequestRecord = 3
+    fromEnum ParamsRecord = 4
+    fromEnum StdinRecord = 5
+    fromEnum StdoutRecord = 6
+    fromEnum StderrRecord = 7
+    fromEnum DataRecord = 8
+    fromEnum GetValuesRecord = 9
+    fromEnum GetValuesResultRecord = 10
+
+
 main :: IO ()
 main = do
-  acceptLoop main'
+  acceptLoop forkIO main'
 
 
 main' :: FastCGI ()
 main' = do
-  FastCGIState { logHandle = logHandle, socket = socket, peer = peer } <- getFastCGIState
-  liftIO $ hPutStrLn logHandle $ "Connection: " ++ (show socket) ++ " " ++ (show peer)
-  liftIO $ hFlush logHandle
+  logFastCGI $ "In the handler."
   return ()
 
 
--- | Takes a handler and sequentially accepts connections from the web server, invoking
---   the handler inside the 'FastCGI' monad for each one.
---   
---   Note that although there is no mechanism to substitute another type of monad for
---   FastCGI, you can enter your own monad within the handler, much as you would enter
---   your own monad within IO.  You simply have to implement the 'FastCGIMonad' class.
---   
---   Any exceptions not caught within the handler are caught by 'acceptLoop', and cause
---   the termination of that handler, but not of the accept loop.  Furthermore, the
---   exception is logged through the FastCGI protocol if at all possible.
---   
---   In the event that the program was not invoked according to the FastCGI protocol,
---   returns.
-acceptLoop
-    :: (FastCGI ())
-    -- ^ A handler which is invoked once for each incoming connection.
-    -> IO ()
-    -- ^ Never actually returns.
-acceptLoop handler = concurrentAcceptLoop (\handler -> do
-                                             handler
-                                             myThreadId)
-                                          handler
-
-
 -- | Takes a forking primitive, such as 'forkIO' or 'forkOS', and a handler, and
---   concurrently accepts connections from the web server, forking with the primitive
+--   concurrently accepts requests from the web server, forking with the primitive
 --   and invoking the handler in the forked thread inside the 'FastCGI' monad for each
 --   one.
+--   
+--   It is valid to use a custom forking primitive, such as one that attempts to pool
+--   OS threads, but the primitive must actually provide concurrency - otherwise there
+--   will be a deadlock.  There is no support for single-threaded operation.
 --   
 --   Note that although there is no mechanism to substitute another type of monad for
 --   FastCGI, you can enter your own monad within the handler, much as you would enter
@@ -109,14 +127,14 @@ acceptLoop handler = concurrentAcceptLoop (\handler -> do
 --   
 --   In the event that the program was not invoked according to the FastCGI protocol,
 --   returns.
-concurrentAcceptLoop
+acceptLoop
     :: (IO () -> IO ThreadId)
     -- ^ A forking primitive, typically either 'forkIO' or 'forkOS'.
     -> (FastCGI ())
     -- ^ A handler which is invoked once for each incoming connection.
     -> IO ()
     -- ^ Never actually returns.
-concurrentAcceptLoop fork handler = do
+acceptLoop fork handler = do
   logHandle <- openFile "/tmp/log.txt" AppendMode
   maybeListenSocket <- createListenSocket
   webServerAddresses <- computeWebServerAddresses
@@ -124,7 +142,7 @@ concurrentAcceptLoop fork handler = do
   case maybeListenSocket of
     Nothing -> return ()
     Just listenSocket -> do
-      let concurrentAcceptLoop' = do
+      let acceptLoop' = do
             (socket, peer) <- Network.accept listenSocket
             let state = FastCGIState {
                            logHandle = logHandle,
@@ -132,9 +150,16 @@ concurrentAcceptLoop fork handler = do
                            socket = socket,
                            peer = peer
                          }
-            fork $ runFastCGI handler state
-            concurrentAcceptLoop'
-      concurrentAcceptLoop'
+            flip runReaderT state $ do
+              addressValid <- validateWebServerAddress
+              case addressValid of
+                False -> do
+                  FastCGIState { peer = peer } <- getFastCGIState
+                  logFastCGI $ "Ignoring connection from invalid address: "
+                               ++ (show peer)
+                True -> requestLoop fork handler
+            acceptLoop'
+      acceptLoop'
 
 
 createListenSocket :: IO (Maybe Network.Socket)
@@ -188,26 +213,6 @@ computeWebServerAddresses = do
                    else System.ioError error)
 
 
-runFastCGI :: (FastCGI ()) -> FastCGIState -> IO ()
-runFastCGI handler state = do
-  Exception.catch (flip runReaderT state $ do
-                     addressValid <- validateWebServerAddress
-                     case addressValid of
-                       False -> do
-                         FastCGIState { peer = peer } <- getFastCGIState
-                         logFastCGI $ "Ignoring connection from invalid address: "
-                                    ++ (show peer)
-                       True -> handler)
-                  (\error -> flip runReaderT state $ do
-                     logFastCGI $ "Uncaught exception: "
-                                  ++ (show (error :: Exception.SomeException)))
-  Exception.catch (Network.sClose $ socket state)
-                  (\error -> do
-                     return $ error :: IO Exception.SomeException
-                     return ())
-  return ()
-
-
 validateWebServerAddress :: (FastCGIMonad m) => m Bool
 validateWebServerAddress = do
   FastCGIState { webServerAddresses = maybeWebServerAddresses, peer = peer }
@@ -222,8 +227,80 @@ validateWebServerAddress = do
                              _ -> False)
 
 
+requestLoop :: (IO () -> IO ThreadId) -> (FastCGI ()) -> FastCGI ()
+requestLoop fork handler = do
+  maybeRecord <- recvRecord
+  case maybeRecord of
+    Nothing -> do
+      FastCGIState { socket = socket } <- getFastCGIState
+      liftIO $ Exception.catch (Network.sClose socket)
+                               (\error -> do
+                                  return $ error :: IO Exception.IOException
+                                  return ())
+      return ()
+    Just request -> do
+      logFastCGI $ show request
+      state <- getFastCGIState
+      liftIO $ fork $ do
+        Exception.catch (runReaderT handler state)
+                        (\error -> flip runReaderT state $ do
+                           logFastCGI $ "Uncaught exception: "
+                                        ++ (show (error :: Exception.SomeException)))
+      requestLoop fork handler
+
+
+recvRecord :: (FastCGIMonad m) => m (Maybe Record)
+recvRecord = do
+  FastCGIState { socket = socket } <- getFastCGIState
+  byteString <- liftIO $ recvAll socket 8
+  case BS.length byteString of
+    8 -> do
+      let recordVersion = BS.index byteString 0
+          recordTypeCode = fromIntegral $ BS.index byteString 1
+          recordRequestIDB1 = BS.index byteString 2
+          recordRequestIDB0 = BS.index byteString 3
+          recordRequestID = (fromIntegral recordRequestIDB1) * 256
+                            + (fromIntegral recordRequestIDB0)
+          recordContentLengthB1 = BS.index byteString 4
+          recordContentLengthB0 = BS.index byteString 5
+          recordContentLength = (fromIntegral recordContentLengthB1) * 256
+                                + (fromIntegral recordContentLengthB0)
+          recordPaddingLength = BS.index byteString 6
+      if recordVersion /= 1
+        then do
+          logFastCGI $ "Record header of unrecognized version: "
+                       ++ (show recordVersion)
+          return Nothing
+        else do
+          let recordType = toEnum recordTypeCode
+          recordContent <- liftIO $ recvAll socket recordContentLength
+          liftIO $ recvAll socket $ fromIntegral recordPaddingLength
+          return $ Just $ Record {
+                              recordType = recordType,
+                              recordRequestID = recordRequestID,
+                              recordContent = recordContent
+                            }
+    _ -> return Nothing
+
+
+recvAll :: Network.Socket -> Int -> IO BS.ByteString
+recvAll socket totalSize = do
+  if totalSize == 0
+    then return BS.empty
+    else do
+      byteString <- Network.recv socket totalSize
+      case BS.length byteString of
+        0 -> return byteString
+        receivedSize | receivedSize == totalSize -> return byteString
+                     | otherwise -> do
+                                  restByteString
+                                      <- recvAll socket $ totalSize - receivedSize
+                                  return $ BS.append byteString restByteString
+
+
+-- | Logs a message using the web server's logging facility.
 logFastCGI :: (FastCGIMonad m) => String -> m ()
 logFastCGI message = do
   FastCGIState { logHandle = logHandle } <- getFastCGIState
-  liftIO $ hPutStrLn logHandle $ "LOG MESSAGE: " ++ message
+  liftIO $ hPutStrLn logHandle message
   liftIO $ hFlush logHandle
