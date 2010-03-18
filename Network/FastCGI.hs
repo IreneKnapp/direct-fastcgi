@@ -961,7 +961,7 @@ fIsReadable = do
     then return True
     else do
       stdinStreamClosed <- liftIO $ readMVar $ stdinStreamClosedMVar request
-      return !stdinStreamClosed
+      return $ not stdinStreamClosed
 
 
 extendStdinStreamBufferToLength :: (FastCGIMonad m) => Int -> Bool -> m ()
@@ -976,7 +976,7 @@ extendStdinStreamBufferToLength desiredLength nonBlocking = do
                              then do
                                isEmpty <- liftIO $ isEmptyChan $ requestChannel request
                                if isEmpty
-                                 then Nothing
+                                 then return Nothing
                                  else do
                                    record <- liftIO $ readChan $ requestChannel request
                                    return $ Just record
@@ -997,3 +997,4 @@ extendStdinStreamBufferToLength desiredLength nonBlocking = do
                      _ -> do
                        fLog $ "Ignoring record of unexpected type "
                               ++ (show $ recordType record)
+  extend stdinStreamBuffer
