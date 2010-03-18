@@ -17,11 +17,23 @@ module Main (
              -- | It is common practice for web servers to make their own extensions to
              --   the CGI/1.1 set of defined variables.  For example, @REMOTE_PORT@ is
              --   not defined by the specification, but often seen in the wild.
-             --   Therefore, there are two levels of call available; defined
-             --   variables may be interrogated directly, and in addition, there
-             --   are higher-level calls which give convenient names and types to the
-             --   same information.
+             --   Furthermore, it is also common for user agents to make their own
+             --   extensions to the HTTP/1.1 set of defined headers.  Therefore, there
+             --   are two levels of call available; defined variables and headers may
+             --   be interrogated directly, and in addition, there are higher-level
+             --   calls which give convenient names and types to the same information.
+             --   
+             --   Cookies may also be manipulated through HTTP headers directly; the
+             --   functions here are provided only as a convenience.
+             getRequestVariable,
+             getAllRequestVariables,
              Header(..),
+             getRequestHeader,
+             getAllRequestHeaders,
+             Cookie(..),
+             getCookie,
+             getAllCookies,
+             getCookieValue
              
              -- * Request content data
              -- | At the moment the handler is invoked, all request headers have been
@@ -49,11 +61,9 @@ module Main (
              --   and the only response header set is @Content-Type: text/html@.  These
              --   may be overridden by later calls, at any time before headers have
              --   been sent.
-             
-             -- * Cookies
-             -- | Cookies may also be manipulated through HTTP headers directly; the
+             --   
+             --   Cookies may also be manipulated through HTTP headers directly; the
              --   functions here are provided only as a convenience.
-             Cookie(..)
             )
     where
 
@@ -816,3 +826,61 @@ isValidInRequest header = (headerType header == RequestHeader)
 isValidInResponse :: Header -> Bool
 isValidInResponse header = (headerType header == ResponseHeader)
                            || (headerType header == EntityHeader)
+
+
+getRequestVariable :: (FastCGIMonad m) => String -> m (Maybe String)
+getRequestVariable name = do
+  state <- getFastCGIState
+  requestVariableMap
+      <- liftIO $ readMVar $ requestVariableMapMVar $ fromJust $ request state
+  return $ Map.lookup name requestVariableMap
+
+
+getAllRequestVariables :: (FastCGIMonad m) => m [(String, String)]
+getAllRequestVariables = do
+  state <- getFastCGIState
+  requestVariableMap
+      <- liftIO $ readMVar $ requestVariableMapMVar $ fromJust $ request state
+  return $ Map.assocs requestVariableMap
+
+
+getRequestHeader :: (FastCGIMonad m) => Header -> m (Maybe String)
+getRequestHeader header = do
+  state <- getFastCGIState
+  requestHeaderMap
+      <- liftIO $ readMVar $ requestHeaderMapMVar $ fromJust $ request state
+  return $ Map.lookup header requestHeaderMap
+
+
+getAllRequestHeaders :: (FastCGIMonad m) => m [(Header, String)]
+getAllRequestHeaders = do
+  state <- getFastCGIState
+  requestHeaderMap
+      <- liftIO $ readMVar $ requestHeaderMapMVar $ fromJust $ request state
+  return $ Map.assocs requestHeaderMap
+
+
+getCookie :: (FastCGIMonad m) => String -> m (Maybe Cookie)
+getCookie name = do
+  state <- getFastCGIState
+  requestCookieMap
+      <- liftIO $ readMVar $ requestCookieMapMVar $ fromJust $ request state
+  return $ Map.lookup name requestCookieMap
+
+
+getAllCookies :: (FastCGIMonad m) => m [Cookie]
+getAllCookies = do
+  state <- getFastCGIState
+  requestCookieMap
+      <- liftIO $ readMVar $ requestCookieMapMVar $ fromJust $ request state
+  return $ Map.elems requestCookieMap
+
+
+getCookieValue :: (FastCGIMonad m) => String -> m (Maybe String)
+getCookieValue name = do
+  state <- getFastCGIState
+  requestCookieMap
+      <- liftIO $ readMVar $ requestCookieMapMVar $ fromJust $ request state
+  return $ case Map.lookup name requestCookieMap of
+    Nothing -> Nothing
+    Just cookie -> Just $ cookieValue cookie
