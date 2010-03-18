@@ -41,7 +41,6 @@ module Main (
              --   content data block the handler (but not other concurrent handlers)
              --   until there is enough data in the buffer to satisfy them, or until
              --   timeout where applicable.
-             fGetLine,
              fGet,
              fGetNonBlocking,
              fGetContents,
@@ -896,14 +895,6 @@ getCookieValue name = do
   return $ case Map.lookup name requestCookieMap of
     Nothing -> Nothing
     Just cookie -> Just $ cookieValue cookie
-
-
--- | Reads a single line of text, delimited by a newline (@LF@), from the input stream
---   of the current request, and interprets it as UTF8.  This is the content data of
---   the HTTP request, if any.  If input has been closed, returns an empty string.  If
---   insufficient input is available, blocks until there is enough.
-fGetLine :: (FastCGIMonad m) => m String
-fGetLine = return ""
 
 
 -- | Reads up to a specified amount of data from the input stream of the current request,
