@@ -33,7 +33,7 @@ module Main (
              Cookie(..),
              getCookie,
              getAllCookies,
-             getCookieValue
+             getCookieValue,
              
              -- * Request content data
              -- | At the moment the handler is invoked, all request headers have been
@@ -41,6 +41,10 @@ module Main (
              --   content data block the handler (but not other concurrent handlers)
              --   until there is enough data in the buffer to satisfy them, or until
              --   timeout where applicable.
+             fGetLine,
+             fGet,
+             fGetNonBlocking,
+             fGetContents
              
              -- * Response information and content data
              -- | When the handler is first invoked, neither response headers nor
@@ -105,6 +109,8 @@ data Request = Request {
       requestID :: Int,
       requestChannel :: Chan Record,
       paramsStreamBufferMVar :: MVar BS.ByteString,
+      stdinStreamBufferMVar :: MVar BS.ByteString,
+      stdinStreamClosedMVar :: MVar Bool,
       requestVariableMapMVar :: MVar (Map.Map String String),
       requestHeaderMapMVar :: MVar (Map.Map Header String),
       requestCookieMapMVar :: MVar (Map.Map String Cookie),
@@ -344,6 +350,8 @@ outsideRequestLoop fork handler = do
           requestChannel <- liftIO $ newChan
           requestChannelMap <- liftIO $ takeMVar $ requestChannelMapMVar state
           paramsStreamBufferMVar <- liftIO $ newMVar $ BS.empty
+          stdinStreamBufferMVar <- liftIO $ newMVar $ BS.empty
+          stdinStreamClosedMVar <- liftIO $ newMVar $ False
           requestVariableMapMVar <- liftIO $ newMVar $ Map.empty
           requestHeaderMapMVar <- liftIO $ newMVar $ Map.empty
           requestCookieMapMVar <- liftIO $ newMVar $ Map.empty
@@ -357,6 +365,8 @@ outsideRequestLoop fork handler = do
                                 requestID = recordRequestID record,
                                 requestChannel = requestChannel,
                                 paramsStreamBufferMVar = paramsStreamBufferMVar,
+                                stdinStreamBufferMVar = stdinStreamBufferMVar,
+                                stdinStreamClosedMVar = stdinStreamClosedMVar,
                                 requestVariableMapMVar = requestVariableMapMVar,
                                 requestHeaderMapMVar = requestHeaderMapMVar,
                                 requestCookieMapMVar = requestCookieMapMVar,
@@ -415,9 +425,9 @@ insideRequestLoop handler = do
                     processRequestVariable name' value'
                     takeUntilEmpty bufferTail'
           takeUntilEmpty bufferWithNewData
+          insideRequestLoop handler
     _ -> do
       logFastCGI $ "inside loop: " ++ (show record)
-  insideRequestLoop handler
 
 
 processRequestVariable :: String -> String -> FastCGI ()
@@ -884,3 +894,67 @@ getCookieValue name = do
   return $ case Map.lookup name requestCookieMap of
     Nothing -> Nothing
     Just cookie -> Just $ cookieValue cookie
+
+
+fGetLine :: (FastCGIMonad m) => m String
+fGetLine = return ""
+
+
+fGet :: (FastCGIMonad m) => Int -> m BS.ByteString
+fGet size = do
+  FastCGIState { request = Just request } <- getFastCGIState
+  extendStdinStreamBufferToLength size False
+  stdinStreamBuffer <- liftIO $ takeMVar $ stdinStreamBufferMVar request
+  if size <= BS.length stdinStreamBuffer
+    then do
+      let result = BS.take size stdinStreamBuffer
+          remainder = BS.drop size stdinStreamBuffer
+      liftIO $ putMVar (stdinStreamBufferMVar request) remainder
+      return result
+    else do
+      liftIO $ putMVar (stdinStreamBufferMVar request) BS.empty
+      return stdinStreamBuffer
+
+
+fGetNonBlocking :: (FastCGIMonad m) => Int -> m BS.ByteString
+fGetNonBlocking size = do
+  FastCGIState { request = Just request } <- getFastCGIState
+  extendStdinStreamBufferToLength size True
+  stdinStreamBuffer <- liftIO $ takeMVar $ stdinStreamBufferMVar request
+  if size <= BS.length stdinStreamBuffer
+    then do
+      let result = BS.take size stdinStreamBuffer
+          remainder = BS.drop size stdinStreamBuffer
+      liftIO $ putMVar (stdinStreamBufferMVar request) remainder
+      return result
+    else do
+      liftIO $ putMVar (stdinStreamBufferMVar request) BS.empty
+      return stdinStreamBuffer
+
+
+fGetContents :: (FastCGIMonad m) => m BS.ByteString
+fGetContents = return $ BS.empty
+
+
+extendStdinStreamBufferToLength :: (FastCGIMonad m) => Int -> Bool -> m ()
+extendStdinStreamBufferToLength desiredLength nonBlocking = return ()
+{-
+extendStdinStreamBufferToLength desiredLength nonBlocking = do
+  FastCGIState { request = Just request } <- getFastCGIState
+  stdinStreamBuffer <- liftIO $ takeMVar $ stdinStreamBufferMVar request
+  let extend bufferSoFar = do
+        if BS.length bufferSoFar >= desiredLength
+          then liftIO $ putMVar (stdinStreamBufferMVar request) bufferSoFar
+          else do
+            record <- liftIO $ readChan $ requestChannel request
+            case recordType record of
+              StdinRecord -> do
+                case BS.length $ recordContent record of
+                  0 -> do
+                    
+                  _ -> do
+                    
+              _ -> do
+                logFastCGI $ "Ignoring record of unexpected type "
+                             ++ (show $ recordType record)
+-}
