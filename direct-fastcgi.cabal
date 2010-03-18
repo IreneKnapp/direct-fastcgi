@@ -30,7 +30,8 @@ description:
 --                  containers >= 0.3.0.0,
 --                  mtl >= 1.1.0.2,
 --                  network >= 2.2.1.7 && < 3,
---                  network-bytestring >= 0.1.2.1 && < 1
+--                  network-bytestring >= 0.1.2.1 && < 1,
+--                  utf8-string >= 0.3.6 && < 1
 
 Executable direct-fastcgi
   main-is: Network/FastCGI.hs
@@ -39,4 +40,5 @@ Executable direct-fastcgi
                  containers >= 0.3.0.0,
                  mtl >= 1.1.0.2,
                  network >= 2.2.1.7 && < 3,
-                 network-bytestring >= 0.1.2.1 && < 1
+                 network-bytestring >= 0.1.2.1 && < 1,
+                 utf8-string >= 0.3.6 && < 1
