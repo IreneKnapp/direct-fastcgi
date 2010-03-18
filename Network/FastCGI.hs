@@ -432,33 +432,62 @@ processRequestHeader header value = do
       <- liftIO $ takeMVar $ requestHeaderMapMVar $ fromJust $ request state
   let requestHeaderMap' = Map.insert header value requestHeaderMap
   liftIO $ putMVar (requestHeaderMapMVar $ fromJust $ request state) requestHeaderMap'
-{-
   case header of
     HttpCookie -> do
       processCookies value
     _ -> return ()
--}
 
 
 processCookies :: String -> FastCGI ()
 processCookies value = do
-  let cookies = parseCookies value
-  logFastCGI $ show cookies
+  state <- getFastCGIState
+  requestCookieMap
+      <- liftIO $ takeMVar $ requestCookieMapMVar $ fromJust $ request state
+  let updateCookieMap cookieMap (cookie:rest)
+          = updateCookieMap (Map.insert (cookieName cookie) cookie cookieMap)
+                            rest
+      updateCookieMap cookieMap [] = cookieMap
+      requestCookieMap' = updateCookieMap requestCookieMap $ parseCookies value
+  liftIO $ putMVar (requestCookieMapMVar $ fromJust $ request state) requestCookieMap'
 
 
 parseCookies :: String -> [Cookie]
 parseCookies value =
-  let split [] = []
-      split string = case findIndex (\c -> (c ==  ';') || (c == ',')) string of
+  let findSeparator string
+          = let quotePoint = if (length string > 0) && (string !! 0 == '"')
+                               then 1 + (findBalancingQuote $ drop 1 string)
+                               else 0
+                maybeSemicolonPoint
+                    = case (findIndex (\c -> (c == ';') || (c == ','))
+                                          $ drop quotePoint string)
+                      of Nothing -> Nothing
+                         Just index -> Just $ index + quotePoint
+            in maybeSemicolonPoint
+      findBalancingQuote string
+          = let consume accumulator ('\\' : c : rest) = consume (accumulator + 2) rest
+                consume accumulator ('"' : rest) = accumulator
+                consume accumulator (c : rest) = consume (accumulator + 1) rest
+                consume accumulator "" = accumulator
+            in consume 0 string
+      split [] = []
+      split string = case findSeparator string of
                        Nothing -> [string]
                        Just index ->
                          let (first, rest) = splitAt index string
                          in first : (split $ drop 1 rest)
-      splitNameValuePair string = case elemIndex '=' string of
+      splitNameValuePair string = case elemIndex '=' (filterNameValuePair string) of
                                     Nothing -> (string, "")
                                     Just index -> let (first, rest)
-                                                          = splitAt index string
-                                                  in (first, (drop 1 rest))
+                                                          = splitAt index
+                                                                    (filterNameValuePair
+                                                                      string)
+                                                  in (first, filterValue (drop 1 rest))
+      filterNameValuePair string
+          = reverse $ dropWhile isSpace $ reverse $ dropWhile isSpace string
+      filterValue string = if (length string > 0) && ((string !! 0) == '"')
+                             then take (findBalancingQuote $ drop 1 string)
+                                       $ drop 1 string
+                             else string
       pairs = map splitNameValuePair $ split value
       (version, pairs') = case pairs of
                                  ("$Version", versionString) : rest
