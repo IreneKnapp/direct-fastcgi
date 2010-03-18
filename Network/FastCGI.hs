@@ -11,7 +11,7 @@ module Main (
              acceptLoop,
              
              -- * Logging
-             logFastCGI,
+             fLog,
              
              -- * Request information
              -- | It is common practice for web servers to make their own extensions to
@@ -44,7 +44,8 @@ module Main (
              fGetLine,
              fGet,
              fGetNonBlocking,
-             fGetContents
+             fGetContents,
+             fIsReadable
              
              -- * Response information and content data
              -- | When the handler is first invoked, neither response headers nor
@@ -199,14 +200,14 @@ main = do
 
 main' :: FastCGI ()
 main' = do
-  logFastCGI $ "In the handler."
+  fLog $ "In the handler."
   state <- getFastCGIState
   requestVariableMap <- liftIO $ readMVar $ requestVariableMapMVar $ fromJust $ request state
   requestHeaderMap <- liftIO $ readMVar $ requestHeaderMapMVar $ fromJust $ request state
   requestCookieMap <- liftIO $ readMVar $ requestCookieMapMVar $ fromJust $ request state
-  logFastCGI $ (show requestVariableMap)
-  logFastCGI $ (show requestHeaderMap)
-  logFastCGI $ (show requestCookieMap)
+  fLog $ (show requestVariableMap)
+  fLog $ (show requestHeaderMap)
+  fLog $ (show requestCookieMap)
   return ()
 
 
@@ -260,8 +261,8 @@ acceptLoop fork handler = do
               case addressValid of
                 False -> do
                   FastCGIState { peer = peer } <- getFastCGIState
-                  logFastCGI $ "Ignoring connection from invalid address: "
-                               ++ (show peer)
+                  fLog $ "Ignoring connection from invalid address: "
+                         ++ (show peer)
                 True -> outsideRequestLoop fork handler
             acceptLoop'
       acceptLoop'
@@ -379,8 +380,8 @@ outsideRequestLoop fork handler = do
           liftIO $ fork $ do
             Exception.catch (runReaderT (insideRequestLoop handler) state')
                             (\error -> flip runReaderT state' $ do
-                               logFastCGI $ "Uncaught exception: "
-                                            ++ (show (error :: Exception.SomeException)))
+                               fLog $ "Uncaught exception: "
+                                      ++ (show (error :: Exception.SomeException)))
           return ()
         OtherRecord unknownCode -> do
           sendRecord $ Record {
@@ -390,7 +391,7 @@ outsideRequestLoop fork handler = do
                                                         0, 0, 0, 0, 0, 0, 0]
                              }
         GetValuesRecord -> do
-          logFastCGI $ "Get values record: " ++ (show record)
+          fLog $ "Get values record: " ++ (show record)
         _ -> do
           state <- getFastCGIState
           requestChannelMap <- liftIO $ readMVar $ requestChannelMapMVar state
@@ -398,7 +399,7 @@ outsideRequestLoop fork handler = do
               maybeRequestChannel = Map.lookup requestID requestChannelMap
           case maybeRequestChannel of
             Nothing ->
-                logFastCGI $ "Ignoring record for unknown request ID " ++ (show requestID)
+                fLog $ "Ignoring record for unknown request ID " ++ (show requestID)
             Just requestChannel -> liftIO $ writeChan requestChannel record
       outsideRequestLoop fork handler
 
@@ -427,7 +428,8 @@ insideRequestLoop handler = do
           takeUntilEmpty bufferWithNewData
           insideRequestLoop handler
     _ -> do
-      logFastCGI $ "inside loop: " ++ (show record)
+      fLog $ "Ignoring record of unexpected type "
+             ++ (show $ recordType record)
 
 
 processRequestVariable :: String -> String -> FastCGI ()
@@ -571,8 +573,8 @@ recvRecord = do
           recordPaddingLength = BS.index byteString 6
       if recordVersion /= 1
         then do
-          logFastCGI $ "Record header of unrecognized version: "
-                       ++ (show recordVersion)
+          fLog $ "Record header of unrecognized version: "
+                 ++ (show recordVersion)
           return Nothing
         else do
           let recordType = toEnum recordTypeCode
@@ -661,8 +663,8 @@ takeNameValuePair byteString
 
 
 -- | Logs a message using the web server's logging facility.
-logFastCGI :: (FastCGIMonad m) => String -> m ()
-logFastCGI message = do
+fLog :: (FastCGIMonad m) => String -> m ()
+fLog message = do
   FastCGIState { logHandle = logHandle } <- getFastCGIState
   liftIO $ hPutStrLn logHandle message
   liftIO $ hFlush logHandle
@@ -896,30 +898,35 @@ getCookieValue name = do
     Just cookie -> Just $ cookieValue cookie
 
 
+-- | Reads a single line of text, delimited by a newline (@LF@), from the input stream
+--   of the current request, and interprets it as UTF8.  This is the content data of
+--   the HTTP request, if any.  If input has been closed, returns an empty string.  If
+--   insufficient input is available, blocks until there is enough.
 fGetLine :: (FastCGIMonad m) => m String
 fGetLine = return ""
 
 
+-- | Reads up to a specified amount of data from the input stream of the current request,
+--   and interprets it as binary data.  This is the content data of the HTTP request,
+--   if any.  If input has been closed, returns an empty bytestring.  If insufficient
+--   input is available, blocks until there is enough.
 fGet :: (FastCGIMonad m) => Int -> m BS.ByteString
-fGet size = do
-  FastCGIState { request = Just request } <- getFastCGIState
-  extendStdinStreamBufferToLength size False
-  stdinStreamBuffer <- liftIO $ takeMVar $ stdinStreamBufferMVar request
-  if size <= BS.length stdinStreamBuffer
-    then do
-      let result = BS.take size stdinStreamBuffer
-          remainder = BS.drop size stdinStreamBuffer
-      liftIO $ putMVar (stdinStreamBufferMVar request) remainder
-      return result
-    else do
-      liftIO $ putMVar (stdinStreamBufferMVar request) BS.empty
-      return stdinStreamBuffer
+fGet size = fGet' size False
 
 
+-- | Reads up to a specified amount of data from the input stream of the curent request,
+--   and interprets it as binary data.  This is the content data of the HTTP request,
+--   if any.  If input has been closed, returns an empty bytestring.  If insufficient
+--   input is available, returns any input which is immediately available, or an empty
+--   bytestring if there is none, never blocking.
 fGetNonBlocking :: (FastCGIMonad m) => Int -> m BS.ByteString
-fGetNonBlocking size = do
+fGetNonBlocking size = fGet' size True
+
+
+fGet' :: (FastCGIMonad m) => Int -> Bool -> m BS.ByteString
+fGet' size nonBlocking = do
   FastCGIState { request = Just request } <- getFastCGIState
-  extendStdinStreamBufferToLength size True
+  extendStdinStreamBufferToLength size nonBlocking
   stdinStreamBuffer <- liftIO $ takeMVar $ stdinStreamBufferMVar request
   if size <= BS.length stdinStreamBuffer
     then do
@@ -932,13 +939,41 @@ fGetNonBlocking size = do
       return stdinStreamBuffer
 
 
+-- | Reads all remaining data from the input stream of the current request, and
+--   interprets it as binary data.  This is the content data of the HTTP request, if
+--   any.  Blocks until all input has been read.  If input has been closed, returns an
+--   empty bytestring.
 fGetContents :: (FastCGIMonad m) => m BS.ByteString
-fGetContents = return $ BS.empty
+fGetContents = do
+  FastCGIState { request = Just request } <- getFastCGIState
+  let extend = do
+        stdinStreamBuffer <- liftIO $ readMVar $ stdinStreamBufferMVar request
+        extendStdinStreamBufferToLength (BS.length stdinStreamBuffer + 1) False
+        stdinStreamClosed <- liftIO $ readMVar $ stdinStreamClosedMVar request
+        if stdinStreamClosed
+          then do
+            stdinStreamBuffer
+                <- liftIO $ swapMVar (stdinStreamBufferMVar request) BS.empty
+            return stdinStreamBuffer
+          else extend
+  extend
+
+
+-- | Returns whether the input stream of the current request potentially has data
+--   remaining, either in the buffer or yet to be read.  This is the content data of
+--   the HTTP request, if any.
+fIsReadable :: (FastCGIMonad m) => m Bool
+fIsReadable = do
+  FastCGIState { request = Just request } <- getFastCGIState
+  stdinStreamBuffer <- liftIO $ readMVar $ stdinStreamBufferMVar request
+  if BS.length stdinStreamBuffer > 0
+    then return True
+    else do
+      stdinStreamClosed <- liftIO $ readMVar $ stdinStreamClosedMVar request
+      return !stdinStreamClosed
 
 
 extendStdinStreamBufferToLength :: (FastCGIMonad m) => Int -> Bool -> m ()
-extendStdinStreamBufferToLength desiredLength nonBlocking = return ()
-{-
 extendStdinStreamBufferToLength desiredLength nonBlocking = do
   FastCGIState { request = Just request } <- getFastCGIState
   stdinStreamBuffer <- liftIO $ takeMVar $ stdinStreamBufferMVar request
@@ -946,15 +981,28 @@ extendStdinStreamBufferToLength desiredLength nonBlocking = do
         if BS.length bufferSoFar >= desiredLength
           then liftIO $ putMVar (stdinStreamBufferMVar request) bufferSoFar
           else do
-            record <- liftIO $ readChan $ requestChannel request
-            case recordType record of
-              StdinRecord -> do
-                case BS.length $ recordContent record of
-                  0 -> do
-                    
-                  _ -> do
-                    
-              _ -> do
-                logFastCGI $ "Ignoring record of unexpected type "
-                             ++ (show $ recordType record)
--}
+            maybeRecord <- if nonBlocking
+                             then do
+                               isEmpty <- liftIO $ isEmptyChan $ requestChannel request
+                               if isEmpty
+                                 then Nothing
+                                 else do
+                                   record <- liftIO $ readChan $ requestChannel request
+                                   return $ Just record
+                             else do
+                               record <- liftIO $ readChan $ requestChannel request
+                               return $ Just record
+            case maybeRecord of
+              Nothing -> liftIO $ putMVar (stdinStreamBufferMVar request) bufferSoFar
+              Just record
+                -> case recordType record of
+                     StdinRecord -> do
+                       case BS.length $ recordContent record of
+                         0 -> do
+                           liftIO $ swapMVar (stdinStreamClosedMVar request) True
+                           liftIO $ putMVar (stdinStreamBufferMVar request) bufferSoFar
+                         _ -> do
+                           extend $ BS.append bufferSoFar $ recordContent record
+                     _ -> do
+                       fLog $ "Ignoring record of unexpected type "
+                              ++ (show $ recordType record)
