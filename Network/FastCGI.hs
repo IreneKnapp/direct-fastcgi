@@ -1,4 +1,4 @@
-{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE TypeSynonymInstances, DeriveDataTypeable #-}
 module Main (
              main,
              -- * The monad
@@ -44,7 +44,7 @@ module Main (
              fGet,
              fGetNonBlocking,
              fGetContents,
-             fIsReadable
+             fIsReadable,
              
              -- * Response information and content data
              -- | When the handler is first invoked, neither response headers nor
@@ -68,6 +68,37 @@ module Main (
              --   
              --   Cookies may also be manipulated through HTTP headers directly; the
              --   functions here are provided only as a convenience.
+             setResponseStatus,
+             getResponseStatus,
+             setResponseHeader,
+             unsetResponseHeader,
+             getResponseHeader,
+             setCookie,
+             unsetCookie,
+             mkSimpleCookie,
+             mkCookie,
+             sendResponseHeaders,
+             responseHeadersSent,
+             fPut,
+             fPutStr,
+             fCloseOutput,
+             fIsWritable,
+             
+             -- * Exceptions
+             --   Because it is not possible for user code to enter the FastCGI monad
+             --   from outside it, catching exceptions in IO will not work.  Therefore
+             --   a full set of exception primitives designed to work with any
+             --   'FastCGIMonad' instance is provided.
+             FastCGIException(..),
+             fThrow,
+             fCatch,
+             fBlock,
+             fUnblock,
+             fBracket,
+             fFinally,
+             fTry,
+             fHandle,
+             fOnException
             )
     where
 
@@ -81,6 +112,7 @@ import Data.Char
 import Data.List
 import qualified Data.Map as Map
 import Data.Maybe
+import Data.Typeable
 import Data.Word
 import Foreign.C.Error
 import GHC.IO.Exception (IOErrorType(..))
@@ -108,12 +140,14 @@ data Request = Request {
       paramsStreamBufferMVar :: MVar BS.ByteString,
       stdinStreamBufferMVar :: MVar BS.ByteString,
       stdinStreamClosedMVar :: MVar Bool,
+      requestEndedMVar :: MVar Bool,
       requestVariableMapMVar :: MVar (Map.Map String String),
       requestHeaderMapMVar :: MVar (Map.Map Header String),
       requestCookieMapMVar :: MVar (Map.Map String Cookie),
       responseStatusMVar :: MVar Int,
       responseHeaderMapMVar :: MVar (Map.Map Header String),
-      responseHeadersSentMVar :: MVar Bool
+      responseHeadersSentMVar :: MVar Bool,
+      responseCookiesMVar :: MVar [Cookie]
     }
 
 
@@ -122,7 +156,10 @@ data Cookie = Cookie {
       cookieValue :: String,
       cookieVersion :: Int,
       cookiePath :: Maybe String,
-      cookieDomain :: Maybe String
+      cookieDomain :: Maybe String,
+      cookieMaxAge :: Maybe Int,
+      cookieSecure :: Bool,
+      cookieComment :: Maybe String
     } deriving (Show)
 
 
@@ -196,6 +233,7 @@ main = do
 
 main' :: FastCGI ()
 main' = do
+  fPutStr "xyzzy"
   return ()
 
 
@@ -339,12 +377,15 @@ outsideRequestLoop fork handler = do
           paramsStreamBufferMVar <- liftIO $ newMVar $ BS.empty
           stdinStreamBufferMVar <- liftIO $ newMVar $ BS.empty
           stdinStreamClosedMVar <- liftIO $ newMVar $ False
+          requestEndedMVar <- liftIO $ newMVar $ False
           requestVariableMapMVar <- liftIO $ newMVar $ Map.empty
           requestHeaderMapMVar <- liftIO $ newMVar $ Map.empty
           requestCookieMapMVar <- liftIO $ newMVar $ Map.empty
           responseStatusMVar <- liftIO $ newMVar $ 200
-          responseHeaderMapMVar <- liftIO $ newMVar $ Map.empty
+          responseHeaderMapMVar
+              <- liftIO $ newMVar $ Map.fromList [(HttpContentType, "text/html")]
           responseHeadersSentMVar <- liftIO $ newMVar $ False
+          responseCookiesMVar <- liftIO $ newMVar $ []
           let requestChannelMap' = Map.insert (recordRequestID record)
                                               requestChannel
                                               requestChannelMap
@@ -354,16 +395,17 @@ outsideRequestLoop fork handler = do
                                 paramsStreamBufferMVar = paramsStreamBufferMVar,
                                 stdinStreamBufferMVar = stdinStreamBufferMVar,
                                 stdinStreamClosedMVar = stdinStreamClosedMVar,
+                                requestEndedMVar = requestEndedMVar,
                                 requestVariableMapMVar = requestVariableMapMVar,
                                 requestHeaderMapMVar = requestHeaderMapMVar,
                                 requestCookieMapMVar = requestCookieMapMVar,
                                 responseStatusMVar = responseStatusMVar,
                                 responseHeaderMapMVar = responseHeaderMapMVar,
-                                responseHeadersSentMVar = responseHeadersSentMVar
+                                responseHeadersSentMVar = responseHeadersSentMVar,
+                                responseCookiesMVar = responseCookiesMVar
                               }
               state' = state { request = Just request }
           liftIO $ putMVar (requestChannelMapMVar state) requestChannelMap'
-          fLog "Foo!"
           liftIO $ fork $ do
             Exception.catch (runReaderT (insideRequestLoop handler) state')
                             (\error -> flip runReaderT state' $ do
@@ -400,6 +442,10 @@ insideRequestLoop handler = do
       case BS.length $ recordContent record of
         0 -> do
           handler
+          requestEnded <- liftIO $ readMVar $ requestEndedMVar request
+          if not requestEnded
+            then terminateRequest
+            else return ()
         _ -> do
           buffer <- liftIO $ takeMVar $ paramsStreamBufferMVar request
           let bufferWithNewData = BS.append buffer $ recordContent record
@@ -514,7 +560,10 @@ parseCookies value =
                                              cookieValue = value,
                                              cookieVersion = version,
                                              cookiePath = maybePath,
-                                             cookieDomain = maybeDomain
+                                             cookieDomain = maybeDomain,
+                                             cookieMaxAge = Nothing,
+                                             cookieSecure = False,
+                                             cookieComment = Nothing
                                            }
                                            : takeCookie pairs'')
                            _ : pairs' -> takeCookie pairs'
@@ -719,7 +768,11 @@ data Header
     | HttpConnection
     | HttpCookie
     | HttpSetCookie
-      deriving (Eq, Ord, Show)
+      deriving (Eq, Ord)
+
+
+instance Show Header where 
+    show header = fromHeader header
 
 
 data HeaderType = RequestHeader
@@ -771,6 +824,96 @@ headerType (HttpExtensionHeader _) = EntityHeader
 headerType HttpConnection = RequestHeader
 headerType HttpCookie = RequestHeader
 headerType HttpSetCookie = ResponseHeader
+
+
+fromHeader :: Header -> String
+fromHeader HttpAccept = "Accept"
+fromHeader HttpAcceptCharset = "Accept-Charset"
+fromHeader HttpAcceptEncoding = "Accept-Encoding"
+fromHeader HttpAcceptLanguage = "Accept-Language"
+fromHeader HttpAuthorization = "Authorization"
+fromHeader HttpExpect = "Expect"
+fromHeader HttpFrom = "From"
+fromHeader HttpHost = "Host"
+fromHeader HttpIfMatch = "If-Match"
+fromHeader HttpIfModifiedSince = "If-Modified-Since"
+fromHeader HttpIfNoneMatch = "If-None-Match"
+fromHeader HttpIfRange = "If-Range"
+fromHeader HttpIfUnmodifiedSince = "If-Unmodified-Since"
+fromHeader HttpMaxForwards = "Max-Forwards"
+fromHeader HttpProxyAuthorization = "Proxy-Authorization"
+fromHeader HttpRange = "Range"
+fromHeader HttpReferer = "Referer"
+fromHeader HttpTE = "TE"
+fromHeader HttpUserAgent = "User-Agent"
+fromHeader HttpAcceptRanges = "Accept-Ranges"
+fromHeader HttpAge = "Age"
+fromHeader HttpETag = "ETag"
+fromHeader HttpLocation = "Location"
+fromHeader HttpProxyAuthenticate = "Proxy-Authenticate"
+fromHeader HttpRetryAfter = "Retry-After"
+fromHeader HttpServer = "Server"
+fromHeader HttpVary = "Vary"
+fromHeader HttpWWWAuthenticate = "WWW-Authenticate"
+fromHeader HttpAllow = "Allow"
+fromHeader HttpContentEncoding = "Content-Encoding"
+fromHeader HttpContentLanguage = "Content-Language"
+fromHeader HttpContentLength = "Content-Length"
+fromHeader HttpContentLocation = "Content-Location"
+fromHeader HttpContentMD5 = "Content-MD5"
+fromHeader HttpContentRange = "Content-Range"
+fromHeader HttpContentType = "Content-Type"
+fromHeader HttpExpires = "Expires"
+fromHeader HttpLastModified = "Last-Modified"
+fromHeader (HttpExtensionHeader name) = name
+fromHeader HttpConnection = "Connection"
+fromHeader HttpCookie = "Cookie"
+fromHeader HttpSetCookie = "Set-Cookie"
+
+
+toHeader :: String -> Header
+toHeader "Accept" = HttpAccept
+toHeader "Accept-Charset" = HttpAcceptCharset
+toHeader "Accept-Encoding" = HttpAcceptEncoding
+toHeader "Accept-Language" = HttpAcceptLanguage
+toHeader "Authorization" = HttpAuthorization
+toHeader "Expect" = HttpExpect
+toHeader "From" = HttpFrom
+toHeader "Host" = HttpHost
+toHeader "If-Match" = HttpIfMatch
+toHeader "If-Modified-Since" = HttpIfModifiedSince
+toHeader "If-None-Match" = HttpIfNoneMatch
+toHeader "If-Range" = HttpIfRange
+toHeader "If-Unmodified-Since" = HttpIfUnmodifiedSince
+toHeader "Max-Forwards" = HttpMaxForwards
+toHeader "Proxy-Authorization" = HttpProxyAuthorization
+toHeader "Range" = HttpRange
+toHeader "Referer" = HttpReferer
+toHeader "TE" = HttpTE
+toHeader "User-Agent" = HttpUserAgent
+toHeader "Accept-Ranges" = HttpAcceptRanges
+toHeader "Age" = HttpAge
+toHeader "ETag" = HttpETag
+toHeader "Location" = HttpLocation
+toHeader "Proxy-Authenticate" = HttpProxyAuthenticate
+toHeader "Retry-After" = HttpRetryAfter
+toHeader "Server" = HttpServer
+toHeader "Vary" = HttpVary
+toHeader "WWW-Authenticate" = HttpWWWAuthenticate
+toHeader "Allow" = HttpAllow
+toHeader "Content-Encoding" = HttpContentEncoding
+toHeader "Content-Language" = HttpContentLanguage
+toHeader "Content-Length" = HttpContentLength
+toHeader "Content-Location" = HttpContentLocation
+toHeader "Content-MD5" = HttpContentMD5
+toHeader "Content-Range" = HttpContentRange
+toHeader "Content-Type" = HttpContentType
+toHeader "Expires" = HttpExpires
+toHeader "Last-Modified" = HttpLastModified
+toHeader "Connection" = HttpConnection
+toHeader "Cookie" = HttpCookie
+toHeader "Set-Cookie" = HttpSetCookie
+toHeader name = HttpExtensionHeader name
 
 
 requestVariableNameIsHeader :: String -> Bool
@@ -830,17 +973,18 @@ requestVariableNameToHeader name
         else Nothing
 
 
-isValidInRequest :: Header -> Bool
-isValidInRequest header = (headerType header == RequestHeader)
-                          || (headerType header == EntityHeader)
-
-
 isValidInResponse :: Header -> Bool
 isValidInResponse header = (headerType header == ResponseHeader)
                            || (headerType header == EntityHeader)
 
 
-getRequestVariable :: (FastCGIMonad m) => String -> m (Maybe String)
+-- | Queries the value from the web server of the CGI/1.1 request variable with the
+--   given name for this request.
+getRequestVariable
+    :: (FastCGIMonad m)
+    => String -- ^ The name of the request variable to query.
+    -> m (Maybe String) -- ^ The value of the request variable, if the web server
+                        --   provided one.
 getRequestVariable name = do
   state <- getFastCGIState
   requestVariableMap
@@ -848,7 +992,10 @@ getRequestVariable name = do
   return $ Map.lookup name requestVariableMap
 
 
-getAllRequestVariables :: (FastCGIMonad m) => m [(String, String)]
+-- | Returns an association list of name-value pairs of all the CGI/1.1 request
+--   variables from the web server.
+getAllRequestVariables
+    :: (FastCGIMonad m) => m [(String, String)]
 getAllRequestVariables = do
   state <- getFastCGIState
   requestVariableMap
@@ -856,7 +1003,11 @@ getAllRequestVariables = do
   return $ Map.assocs requestVariableMap
 
 
-getRequestHeader :: (FastCGIMonad m) => Header -> m (Maybe String)
+-- | Queries the value from the user agent of the given HTTP/1.1 header.
+getRequestHeader
+    :: (FastCGIMonad m)
+    => Header -- ^ The header to query.  Must be a request or entity header.
+    -> m (Maybe String) -- ^ The value of the header, if the user agent provided one.
 getRequestHeader header = do
   state <- getFastCGIState
   requestHeaderMap
@@ -864,6 +1015,8 @@ getRequestHeader header = do
   return $ Map.lookup header requestHeaderMap
 
 
+-- | Returns an association list of name-value pairs of all the HTTP/1.1 request or
+--   entity headers from the user agent.
 getAllRequestHeaders :: (FastCGIMonad m) => m [(Header, String)]
 getAllRequestHeaders = do
   state <- getFastCGIState
@@ -872,7 +1025,12 @@ getAllRequestHeaders = do
   return $ Map.assocs requestHeaderMap
 
 
-getCookie :: (FastCGIMonad m) => String -> m (Maybe Cookie)
+-- | Returns a 'Cookie' object for the given name, if the user agent provided one
+--   in accordance with RFC 2109.
+getCookie
+    :: (FastCGIMonad m)
+    => String -- ^ The name of the cookie to look for.
+    -> m (Maybe Cookie) -- ^ The cookie, if the user agent provided it.
 getCookie name = do
   state <- getFastCGIState
   requestCookieMap
@@ -880,6 +1038,8 @@ getCookie name = do
   return $ Map.lookup name requestCookieMap
 
 
+-- | Returns all 'Cookie' objects provided by the user agent in accordance 
+--   RFC 2109.
 getAllCookies :: (FastCGIMonad m) => m [Cookie]
 getAllCookies = do
   state <- getFastCGIState
@@ -888,7 +1048,12 @@ getAllCookies = do
   return $ Map.elems requestCookieMap
 
 
-getCookieValue :: (FastCGIMonad m) => String -> m (Maybe String)
+-- | A convenience method; as 'getCookie', but returns only the value of the cookie
+--   rather than a 'Cookie' object.
+getCookieValue
+    :: (FastCGIMonad m)
+    => String -- ^ The name of the cookie to look for.
+    -> m (Maybe String) -- ^ The value of the cookie, if the user agent provided it.
 getCookieValue name = do
   state <- getFastCGIState
   requestCookieMap
@@ -901,7 +1066,8 @@ getCookieValue name = do
 -- | Reads up to a specified amount of data from the input stream of the current request,
 --   and interprets it as binary data.  This is the content data of the HTTP request,
 --   if any.  If input has been closed, returns an empty bytestring.  If insufficient
---   input is available, blocks until there is enough.
+--   input is available, blocks until there is enough.  If output has been closed,
+--   causes an 'OutputAlreadyClosed' exception.
 fGet :: (FastCGIMonad m) => Int -> m BS.ByteString
 fGet size = fGet' size False
 
@@ -910,13 +1076,15 @@ fGet size = fGet' size False
 --   and interprets it as binary data.  This is the content data of the HTTP request,
 --   if any.  If input has been closed, returns an empty bytestring.  If insufficient
 --   input is available, returns any input which is immediately available, or an empty
---   bytestring if there is none, never blocking.
+--   bytestring if there is none, never blocking.  If output has been closed, causes an
+--   'OutputAlreadyClosed' exception.
 fGetNonBlocking :: (FastCGIMonad m) => Int -> m BS.ByteString
 fGetNonBlocking size = fGet' size True
 
 
 fGet' :: (FastCGIMonad m) => Int -> Bool -> m BS.ByteString
 fGet' size nonBlocking = do
+  requireOutputNotYetClosed
   FastCGIState { request = Just request } <- getFastCGIState
   extendStdinStreamBufferToLength size nonBlocking
   stdinStreamBuffer <- liftIO $ takeMVar $ stdinStreamBufferMVar request
@@ -934,9 +1102,11 @@ fGet' size nonBlocking = do
 -- | Reads all remaining data from the input stream of the current request, and
 --   interprets it as binary data.  This is the content data of the HTTP request, if
 --   any.  Blocks until all input has been read.  If input has been closed, returns an
---   empty bytestring.
+--   empty bytestring.  If output has been closed, causes an 'OutputAlreadyClosed'
+--   exception.
 fGetContents :: (FastCGIMonad m) => m BS.ByteString
 fGetContents = do
+  requireOutputNotYetClosed
   FastCGIState { request = Just request } <- getFastCGIState
   let extend = do
         stdinStreamBuffer <- liftIO $ readMVar $ stdinStreamBufferMVar request
@@ -962,7 +1132,8 @@ fIsReadable = do
     then return True
     else do
       stdinStreamClosed <- liftIO $ readMVar $ stdinStreamClosedMVar request
-      return $ not stdinStreamClosed
+      requestEnded <- liftIO $ readMVar $ requestEndedMVar request
+      return $ (not stdinStreamClosed) && (not requestEnded)
 
 
 extendStdinStreamBufferToLength :: (FastCGIMonad m) => Int -> Bool -> m ()
@@ -999,3 +1170,405 @@ extendStdinStreamBufferToLength desiredLength nonBlocking = do
                        fLog $ "Ignoring record of unexpected type "
                               ++ (show $ recordType record)
   extend stdinStreamBuffer
+
+
+-- | Sets the response status which will be sent with the response headers.  If the
+--   response headers have already been sent, causes a 'ResponseHeadersAlreadySent'
+--   exception.
+setResponseStatus
+    :: (FastCGIMonad m)
+    => Int -- ^ The HTTP/1.1 status code to set.
+    -> m ()
+setResponseStatus status = do
+  requireResponseHeadersNotYetSent
+  -- TODO
+      
+
+
+-- | Returns the response status which will be or has been sent with the response
+--   headers.
+getResponseStatus
+    :: (FastCGIMonad m)
+    => m Int -- ^ The HTTP/1.1 status code.
+getResponseStatus = do
+  return 200
+  -- TODO
+
+
+
+-- | Sets the given 'HttpHeader' response header to the given string value, overriding
+--   any value which has previously been set.  If the response headers have already
+--   been sent, causes a 'ResponseHeadersAlreadySent' exception.
+--   
+--   If a value is set for the 'HttpSetCookie' header, this overrides all cookies set
+--   for this request with 'setCookie'.
+setResponseHeader
+    :: (FastCGIMonad m)
+    => Header -- ^ The header to set.  Must be a response header or an entity header.
+    -> String -- ^ The value to set.
+    -> m ()
+setResponseHeader header value = do
+  requireResponseHeadersNotYetSent
+  return ()
+  -- TODO
+
+
+-- | Causes the given 'HttpHeader' response header not to be sent, overriding any value
+--   which has previously been set.  If the response headers have already been sent,
+--   causes a 'ResponseHeadersAlreadySent' exception.
+--   
+--   Does not prevent the 'HttpSetCookie' header from being sent if cookies have been
+--   set for this request with 'setCookie'.
+unsetResponseHeader
+    :: (FastCGIMonad m)
+    => Header -- ^ The header to unset.  Must be a response header or an entity header.
+    -> m ()
+unsetResponseHeader header = do
+  requireResponseHeadersNotYetSent
+  return ()
+  -- TODO
+
+
+-- | Returns the value of the given header which will be or has been sent with the
+--   response headers.
+getResponseHeader
+    :: (FastCGIMonad m)
+    => Header -- ^ The header to query.  Must be a response header or an entity
+              --   header.
+    -> m (Maybe String) -- ^ The value of the queried header.
+getResponseHeader header = do
+  return Nothing
+  -- TODO
+
+
+-- | Causes the user agent to record the given cookie and send it back with future
+--   loads of this page.  Does not take effect instantly, but rather when headers are
+--   sent.  Cookies are set in accordance with RFC 2109.
+--   If an @HttpCookie@ header is set for this request by a call to 'setResponseHeader',
+--   this function has no effect.
+--   If the response headers have already been sent,
+--   causes a 'ResponseHeadersAlreadySent' exception.
+setCookie
+    :: (FastCGIMonad m)
+    => Cookie -- ^ The cookie to set.
+    -> m ()
+setCookie cookie = do
+  requireResponseHeadersNotYetSent
+  return ()
+  -- TODO
+
+
+-- | Causes the user agent to unset any cookie applicable to this page with the
+--   given name.  Does not take effect instantly, but rather when headers are sent.
+--   If an @HttpCookie@ header is set for this request by a call to 'setResponseHeader',
+--   this function has no effect.
+--   If the response headers have already been sent,
+--   causes a 'ResponseHeadersAlreadySent' exception.
+unsetCookie
+    :: (FastCGIMonad m)
+    => String -- ^ The name of the cookie to unset.
+    -> m ()
+unsetCookie name = do
+  requireResponseHeadersNotYetSent
+  return ()
+  -- TODO
+
+
+-- | Constructs a cookie with the given name and value.  Version is set to 1;
+--   path, domain, and maximum age are set to @Nothing@; and the secure flag is
+--   set to @False@.  Constructing the cookie does not cause it to be set; to do
+--   that, call 'setCookie' on it.
+mkSimpleCookie
+    :: String -- ^ The name of the cookie to construct.
+    -> String -- ^ The value of the cookie to construct.
+    -> Cookie -- ^ A cookie with the given name and value.
+mkSimpleCookie name value = Cookie {
+                              cookieName = name,
+                              cookieValue = value,
+                              cookieVersion = 1,
+                              cookiePath = Nothing,
+                              cookieDomain = Nothing,
+                              cookieMaxAge = Nothing,
+                              cookieSecure = False,
+                              cookieComment = Nothing
+                            }
+
+
+-- | Constructs a cookie with the given parameters.  Version is set to 1.
+--   Constructing the cookie does not cause it to be set; to do that, call 'setCookie'
+--   on it.
+mkCookie
+    :: String -- ^ The name of the cookie to construct.
+    -> String -- ^ The value of the cookie to construct.
+    -> (Maybe String) -- ^ The path of the cookie to construct.
+    -> (Maybe String) -- ^ The domain of the cookie to construct.
+    -> (Maybe Int) -- ^ The maximum age of the cookie to construct, in seconds.
+    -> Bool -- ^ Whether to flag the cookie to construct as secure.
+    -> Cookie -- ^ A cookie with the given parameters.
+mkCookie name value maybePath maybeDomain maybeMaxAge secure
+    = Cookie {
+        cookieName = name,
+        cookieValue = value,
+        cookieVersion = 1,
+        cookiePath = maybePath,
+        cookieDomain = maybeDomain,
+        cookieMaxAge = maybeMaxAge,
+        cookieSecure = secure,
+        cookieComment = Nothing
+      }
+
+
+-- | An exception originating within the FastCGI infrastructure or the web server.
+data FastCGIException
+    = ResponseHeadersAlreadySent
+      -- ^ An exception thrown by operations which require the response headers not
+      --   to have been sent yet.
+    | OutputAlreadyClosed
+      -- ^ An exception thrown by operations which produce output when output has
+      --   been closed, as by 'fCloseOutput'.
+      deriving (Show, Typeable)
+
+
+instance Exception.Exception FastCGIException
+
+
+-- | Ensures that the response headers have been sent.  If they are already sent, does
+--   nothing.  If output has already been closed, causes an 'OutputAlreadyClosed'
+--   exception.
+sendResponseHeaders :: (FastCGIMonad m) => m ()
+sendResponseHeaders = do
+  requireOutputNotYetClosed
+  FastCGIState { request = Just request } <- getFastCGIState
+  alreadySent <- liftIO $ takeMVar $ responseHeadersSentMVar request
+  if not alreadySent
+    then do
+      responseStatus <- liftIO $ readMVar $ responseStatusMVar request
+      responseHeaderMap <- liftIO $ readMVar $ responseHeaderMapMVar request
+      let nameValuePairs = [("Status", (show responseStatus))]
+                           ++ (map (\key -> (fromHeader key,
+                                             fromJust $ Map.lookup key responseHeaderMap))
+                                   $ Map.keys responseHeaderMap)
+          bytestrings
+              = (map (\(name, value) -> BS.fromString $ name ++ ": " ++ value ++ "\r\n")
+                     nameValuePairs)
+                ++ [BS.fromString "\r\n"]
+          buffer = foldl BS.append BS.empty bytestrings
+      sendBuffer buffer
+    else return ()
+  liftIO $ putMVar (responseHeadersSentMVar request) True
+
+
+-- | Returns whether the response headers have been sent.
+responseHeadersSent :: (FastCGIMonad m) => m Bool
+responseHeadersSent = do
+  FastCGIState { request = Just request } <- getFastCGIState
+  liftIO $ readMVar $ responseHeadersSentMVar request
+
+
+-- | Sends data.  This is the content data of the HTTP response.  If the response
+--   headers have not been sent, first sends them.  If output has already been closed,
+--   causes an 'OutputAlreadyClosed' exception.
+fPut :: (FastCGIMonad m) => BS.ByteString -> m ()
+fPut buffer = do
+  requireOutputNotYetClosed
+  sendResponseHeaders
+  sendBuffer buffer
+  return ()
+
+
+-- | Sends text, encoded as UTF-8.  This is the content data of the HTTP response.
+--   if the response headers have not been sent, first sends them.  If output has
+--   already been closed, causes an 'OutputAlreadyClosed' exception.
+fPutStr :: (FastCGIMonad m) => String -> m ()
+fPutStr string = fPut $ BS.fromString string
+
+
+-- | Informs the web server and the user agent that the request has completed.  As
+--   a side-effect, any unread input is discarded and no more can be read.  This is
+--   implicitly called, if it has not already been, after the handler returns; it
+--   may be useful within a handler if the handler wishes to return results and then
+--   perform time-consuming computations before exiting.  If output has already been
+--   closed, causes an 'OutputAlreadyClosed' exception.
+fCloseOutput :: (FastCGIMonad m) => m ()
+fCloseOutput = do
+  requireOutputNotYetClosed
+  terminateRequest
+
+
+-- | Returns whether it is possible to write more data; ie, whether output has not
+--   yet been closed as by 'fCloseOutput'.
+fIsWritable :: (FastCGIMonad m) => m Bool
+fIsWritable = do
+  return True
+  -- TODO
+
+
+sendBuffer :: (FastCGIMonad m) => BS.ByteString -> m ()
+sendBuffer buffer = do
+  let length = BS.length buffer
+      lengthThisRecord = minimum [length, 0xFFFF]
+      bufferThisRecord = BS.take lengthThisRecord buffer
+      bufferRemaining = BS.drop lengthThisRecord buffer
+  if lengthThisRecord > 0
+    then do
+      FastCGIState { request = Just request } <- getFastCGIState
+      sendRecord $ Record {
+                       recordType = StdoutRecord,
+                       recordRequestID = requestID request,
+                       recordContent = bufferThisRecord
+                     }
+    else return ()
+  if length > lengthThisRecord
+    then sendBuffer bufferRemaining
+    else return ()
+
+
+terminateRequest :: (FastCGIMonad m) => m ()
+terminateRequest = do
+  FastCGIState { request = Just request } <- getFastCGIState
+  sendRecord $ Record {
+                     recordType = EndRequestRecord,
+                     recordRequestID = requestID request,
+                     recordContent = BS.pack [0, 0, 0, 0, 0, 0, 0, 0]
+                   }
+
+
+requireResponseHeadersNotYetSent :: (FastCGIMonad m) => m ()
+requireResponseHeadersNotYetSent = do
+  FastCGIState { request = Just request } <- getFastCGIState
+  alreadySent <- liftIO $ readMVar $ responseHeadersSentMVar request
+  if alreadySent
+    then -- fThrow ResponseHeadersAlreadySent TODO
+        return ()
+    else return ()
+
+
+requireOutputNotYetClosed :: (FastCGIMonad m) => m ()
+requireOutputNotYetClosed = do
+  FastCGIState { request = Just request } <- getFastCGIState
+  requestEnded <- liftIO $ readMVar $ requestEndedMVar request
+  if requestEnded
+    then -- fThrow OutputAlreadyClosed TODO
+        return ()
+    else return ()
+
+
+-- BIG BIG TODO TODO TODO re-generalize all the exception functions to FastCGIMonad.
+
+-- | Throw an exception in any 'FastCGIMonad' monad.
+fThrow
+    :: (Exception.Exception e)
+    => e -- ^ The exception to throw.
+    -> FastCGI a
+fThrow exception = liftIO $ Exception.throwIO exception
+
+
+-- | Perform an action, with a given exception-handler action bound.  See
+--   'Control.Exception.catch'.  The type of exception to catch is determined by the
+--   type signature of the handler.
+fCatch
+    :: (Exception.Exception e)
+    => FastCGI a -- ^ The action to run with the exception handler binding in scope.
+    -> (e -> FastCGI a) -- ^ The exception handler to bind.
+    -> FastCGI a
+fCatch action handler = do
+  state <- getFastCGIState
+  liftIO $ Exception.catch (runReaderT action state)
+                           (\exception -> do
+                              runReaderT (handler exception) state)
+
+
+-- | Block exceptions within an action, as per the discussion in 'Control.Exception'.
+fBlock
+    ::
+    FastCGI a -- ^ The action to run with exceptions blocked.
+    -> FastCGI a
+fBlock action = do
+  state <- getFastCGIState
+  liftIO $ Exception.block (runReaderT action state)
+
+
+-- | Unblock exceptions within an action, as per the discussion in 'Control.Exception'.
+fUnblock
+    ::
+    FastCGI a -- ^ The action to run with exceptions unblocked.
+    -> FastCGI a
+fUnblock action = do
+  state <- getFastCGIState
+  liftIO $ Exception.unblock (runReaderT action state)
+
+
+-- | Acquire a resource, perform computation with it, and release it; see the description
+--   of 'Control.Exception.bracket'.  If an exception is raised during the computation,
+--   'fBracket' will re-raise it after running the release function, having the effect
+--   of propagating the exception further up the call stack.
+fBracket
+    ::
+    FastCGI a -- ^ The action to acquire the resource.
+    -> (a -> FastCGI b) -- ^ The action to release the resource.
+    -> (a -> FastCGI c) -- ^ The action to perform using the resource.
+    -> FastCGI c -- ^ The return value of the perform-action.
+fBracket acquire release perform = do
+  fBlock (do
+           resource <- acquire
+           result <- fUnblock (perform resource) `fOnException` (release resource)
+           release resource
+           return result)
+
+
+-- | Perform an action, with a cleanup action bound to always occur; see the
+--   description of 'Control.Exception.finally'.  If an exception is raised during the
+--   computation, 'fFinally' will re-raise it after running the cleanup action, having
+--   the effect of propagating the exception further up the call stack.  If no
+--   exception is raised, the cleanup action will be invoked after the main action is
+--   performed.
+fFinally
+    ::
+    FastCGI a -- ^ The action to perform.
+    -> FastCGI b -- ^ The cleanup action.
+    -> FastCGI a -- ^ The return value of the perform-action.
+fFinally perform cleanup = do
+  fBlock (do
+           result <- fUnblock perform `fOnException` cleanup
+           cleanup
+           return result)
+
+
+-- | Perform an action.  If any exceptions of the appropriate type occur within the
+--   action, return 'Left' @exception@; otherwise, return 'Right' @result@.
+fTry
+    :: (Exception.Exception e)
+    => FastCGI a -- ^ The action to perform.
+    -> FastCGI (Either e a)
+fTry action = do
+  fCatch (do
+           result <- action
+           return $ Right result)
+         (\exception -> return $ Left exception)
+
+
+-- | As 'fCatch', but with the arguments in the other order.
+fHandle
+    :: (Exception.Exception e)
+    => (e -> FastCGI a) -- ^ The exception handler to bind.
+    -> FastCGI a -- ^ The action to run with the exception handler binding in scope.
+    -> FastCGI a
+fHandle handler action = fCatch action handler
+
+
+-- | Perform an action, with a cleanup action bound to occur if and only if an exception
+--   is raised during the action; see the description of 'Control.Exception.finally'.
+--   If an exception is raised during the computation, 'fFinally' will re-raise it
+--   after running the cleanup action, having the effect of propagating the exception
+--   further up the call stack.  If no exception is raised, the cleanup action will not
+--   be invoked.
+fOnException
+    ::
+    FastCGI a -- ^ The action to perform.
+    -> FastCGI b -- ^ The cleanup action.
+    -> FastCGI a -- ^ The return value of the perform-action.
+fOnException action cleanup = do
+  fCatch action
+         (\exception -> do
+            cleanup
+            fThrow (exception :: Exception.SomeException))
