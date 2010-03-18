@@ -91,12 +91,9 @@ import System.Environment
 import System.IO.Error (ioeGetErrorType)
 import qualified System.IO.Error as System
 
-import System.IO
-
 
 -- | An opaque type representing the state of a single connection from the web server.
 data FastCGIState = FastCGIState {
-      logHandle :: Handle,
       webServerAddresses :: Maybe [Network.HostAddress],
       socket :: Network.Socket,
       peer :: Network.SockAddr,
@@ -199,14 +196,6 @@ main = do
 
 main' :: FastCGI ()
 main' = do
-  fLog $ "In the handler."
-  state <- getFastCGIState
-  requestVariableMap <- liftIO $ readMVar $ requestVariableMapMVar $ fromJust $ request state
-  requestHeaderMap <- liftIO $ readMVar $ requestHeaderMapMVar $ fromJust $ request state
-  requestCookieMap <- liftIO $ readMVar $ requestCookieMapMVar $ fromJust $ request state
-  fLog $ (show requestVariableMap)
-  fLog $ (show requestHeaderMap)
-  fLog $ (show requestCookieMap)
   return ()
 
 
@@ -238,7 +227,6 @@ acceptLoop
     -> IO ()
     -- ^ Never actually returns.
 acceptLoop fork handler = do
-  logHandle <- openFile "/tmp/log.txt" AppendMode
   maybeListenSocket <- createListenSocket
   webServerAddresses <- computeWebServerAddresses
   case maybeListenSocket of
@@ -248,7 +236,6 @@ acceptLoop fork handler = do
             (socket, peer) <- Network.accept listenSocket
             requestChannelMapMVar <- newMVar $ Map.empty
             let state = FastCGIState {
-                           logHandle = logHandle,
                            webServerAddresses = webServerAddresses,
                            socket = socket,
                            peer = peer,
@@ -376,6 +363,7 @@ outsideRequestLoop fork handler = do
                               }
               state' = state { request = Just request }
           liftIO $ putMVar (requestChannelMapMVar state) requestChannelMap'
+          fLog "Foo!"
           liftIO $ fork $ do
             Exception.catch (runReaderT (insideRequestLoop handler) state')
                             (\error -> flip runReaderT state' $ do
@@ -664,9 +652,22 @@ takeNameValuePair byteString
 -- | Logs a message using the web server's logging facility.
 fLog :: (FastCGIMonad m) => String -> m ()
 fLog message = do
-  FastCGIState { logHandle = logHandle } <- getFastCGIState
-  liftIO $ hPutStrLn logHandle message
-  liftIO $ hFlush logHandle
+  FastCGIState { request = maybeRequest } <- getFastCGIState
+  case maybeRequest of
+    Nothing -> do
+      -- As you can see, the description is actually incomplete.  If there's no request
+      -- in progress, we use syslog instead.  But since the user can never call us
+      -- outside a request, that would only be confusing if documented.
+      -- liftIO $ withSyslog "direct-fastcgi" [PID] USER $ syslog Error message
+      return ()
+    Just request -> do
+      if length message > 0
+        then sendRecord $ Record {
+                      recordType = StderrRecord,
+                      recordRequestID = requestID request,
+                      recordContent = BS.fromString message
+                    }
+        else return ()
 
 
 -- | Headers are classified by HTTP/1.1 as request headers, response headers, or
