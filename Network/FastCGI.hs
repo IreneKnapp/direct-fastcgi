@@ -77,6 +77,8 @@ module Main (
              unsetCookie,
              mkSimpleCookie,
              mkCookie,
+             permanentRedirect,
+             seeOtherRedirect,
              sendResponseHeaders,
              responseHeadersSent,
              fPut,
@@ -233,8 +235,12 @@ main = do
 
 main' :: FastCGI ()
 main' = do
-  fPutStr "xyzzy"
-  return ()
+  Just queryString <- getRequestVariable "QUERY_STRING"
+  fLog queryString
+  if queryString /= "/foo"
+    then permanentRedirect "/foo"
+    else do
+      fPutStr "xyzzy"
 
 
 -- | Takes a forking primitive, such as 'forkIO' or 'forkOS', and a handler, and
@@ -442,6 +448,7 @@ insideRequestLoop handler = do
       case BS.length $ recordContent record of
         0 -> do
           handler
+          sendResponseHeaders
           requestEnded <- liftIO $ readMVar $ requestEndedMVar request
           if not requestEnded
             then terminateRequest
@@ -1181,7 +1188,9 @@ setResponseStatus
     -> m ()
 setResponseStatus status = do
   requireResponseHeadersNotYetSent
-  -- TODO
+  FastCGIState { request = Just request } <- getFastCGIState
+  liftIO $ swapMVar (responseStatusMVar request) status
+  return ()
       
 
 
@@ -1191,14 +1200,15 @@ getResponseStatus
     :: (FastCGIMonad m)
     => m Int -- ^ The HTTP/1.1 status code.
 getResponseStatus = do
-  return 200
-  -- TODO
-
+  FastCGIState { request = Just request } <- getFastCGIState
+  liftIO $ readMVar (responseStatusMVar request)
 
 
 -- | Sets the given 'HttpHeader' response header to the given string value, overriding
 --   any value which has previously been set.  If the response headers have already
---   been sent, causes a 'ResponseHeadersAlreadySent' exception.
+--   been sent, causes a 'ResponseHeadersAlreadySent' exception.  If the header is not
+--   an HTTP/1.1 or extension response or entity header, ie, is not valid as part of
+--   a response, causes a 'NotAResponseHeader' exception.
 --   
 --   If a value is set for the 'HttpSetCookie' header, this overrides all cookies set
 --   for this request with 'setCookie'.
@@ -1209,13 +1219,21 @@ setResponseHeader
     -> m ()
 setResponseHeader header value = do
   requireResponseHeadersNotYetSent
-  return ()
-  -- TODO
+  if isValidInResponse header
+    then do
+      FastCGIState { request = Just request } <- getFastCGIState
+      responseHeaderMap <- liftIO $ takeMVar $ responseHeaderMapMVar request
+      let responseHeaderMap' = Map.insert header value responseHeaderMap
+      liftIO $ putMVar (responseHeaderMapMVar request) responseHeaderMap'
+    else -- fThrow $ NotAResponseHeader header
+        return ()
 
 
 -- | Causes the given 'HttpHeader' response header not to be sent, overriding any value
 --   which has previously been set.  If the response headers have already been sent,
---   causes a 'ResponseHeadersAlreadySent' exception.
+--   causes a 'ResponseHeadersAlreadySent' exception.  If the header is not an HTTP/1.1
+--   or extension response or entity header, ie, is not valid as part of a response,
+--   causes a 'NotAResponseHeader' exception.
 --   
 --   Does not prevent the 'HttpSetCookie' header from being sent if cookies have been
 --   set for this request with 'setCookie'.
@@ -1225,20 +1243,34 @@ unsetResponseHeader
     -> m ()
 unsetResponseHeader header = do
   requireResponseHeadersNotYetSent
-  return ()
-  -- TODO
+  if isValidInResponse header
+    then do
+      FastCGIState { request = Just request } <- getFastCGIState
+      responseHeaderMap <- liftIO $ takeMVar $ responseHeaderMapMVar request
+      let responseHeaderMap' = Map.delete header responseHeaderMap
+      liftIO $ putMVar (responseHeaderMapMVar request) responseHeaderMap'
+    else -- fThrow $ NotAResponseHeader header
+        return ()
 
 
 -- | Returns the value of the given header which will be or has been sent with the
---   response headers.
+--   response headers.  If the header is not an HTTP/1.1 or extension response or entity
+--   header, ie, is not valid as part of a response, causes a 'NotAResponseHeader'
+--   exception.
 getResponseHeader
     :: (FastCGIMonad m)
     => Header -- ^ The header to query.  Must be a response header or an entity
               --   header.
     -> m (Maybe String) -- ^ The value of the queried header.
 getResponseHeader header = do
-  return Nothing
-  -- TODO
+  requireResponseHeadersNotYetSent
+  if isValidInResponse header
+    then do
+      FastCGIState { request = Just request } <- getFastCGIState
+      responseHeaderMap <- liftIO $ readMVar $ responseHeaderMapMVar request
+      return $ Map.lookup header responseHeaderMap
+    else -- fThrow $ NotAResponseHeader header
+        return Nothing
 
 
 -- | Causes the user agent to record the given cookie and send it back with future
@@ -1326,10 +1358,41 @@ data FastCGIException
     | OutputAlreadyClosed
       -- ^ An exception thrown by operations which produce output when output has
       --   been closed, as by 'fCloseOutput'.
+    | NotAResponseHeader Header
+      -- ^ An exception thrown by operations which are given a header that does not
+      --   meet their requirement of being valid in a response.
       deriving (Show, Typeable)
 
 
 instance Exception.Exception FastCGIException
+
+
+-- | Sets the HTTP/1.1 return status to 301 and sets the 'HttpLocation' header to
+--   the provided URL.  This has the effect of issuing a permanent redirect to the
+--   user agent.  Permanent redirects, as opposed to temporary redirects, may cause
+--   bookmarks or incoming links to be updated.  If the response headers have already
+--   been sent, causes a 'ResponseHeadersAlreadySent' exception.
+permanentRedirect
+    :: (FastCGIMonad m)
+    => String -- ^ The URL to redirect to, as a string.
+    -> m ()
+permanentRedirect url = do
+  setResponseStatus 301
+  setResponseHeader HttpLocation url
+
+
+-- | Sets the HTTP/1.1 return status to 303 and sets the 'HttpLocation' header to
+--   the provided URL.  This has the effect of issuing a see-other or "temporary"
+--   redirect to the user agent.  Temporary redirects, as opposed to permanent redirects,
+--   do not cause bookmarks or incoming links to be updated.  If the response headers
+--   have already been sent, causes a 'ResponseHeadersAlreadySent' exception.
+seeOtherRedirect
+    :: (FastCGIMonad m)
+    => String -- ^ The URL to redirect to, as a string.
+    -> m ()
+seeOtherRedirect url = do
+  setResponseStatus 303
+  setResponseHeader HttpLocation url
 
 
 -- | Ensures that the response headers have been sent.  If they are already sent, does
