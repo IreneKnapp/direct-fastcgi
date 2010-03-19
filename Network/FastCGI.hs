@@ -2,9 +2,13 @@
 module Network.FastCGI (
              -- * The monad
              FastCGI,
-             MonadFastCGI,
              FastCGIState,
+             MonadFastCGI,
              getFastCGIState,
+             implementationThrowFastCGI,
+             implementationCatchFastCGI,
+             implementationBlockFastCGI,
+             implementationUnblockFastCGI,
              
              -- * Accepting requests
              acceptLoop,
