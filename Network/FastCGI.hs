@@ -3,7 +3,7 @@ module Main (
              main,
              -- * The monad
              FastCGI,
-             FastCGIMonad,
+             MonadFastCGI,
              FastCGIState,
              getFastCGIState,
              
@@ -114,7 +114,7 @@ module Main (
              --   Because it is not possible for user code to enter the FastCGI monad
              --   from outside it, catching exceptions in IO will not work.  Therefore
              --   a full set of exception primitives designed to work with any
-             --   'FastCGIMonad' instance is provided.
+             --   'MonadFastCGI' instance is provided.
              FastCGIException(..),
              fThrow,
              fCatch,
@@ -195,7 +195,7 @@ type FastCGI = ReaderT FastCGIState IO
 
 -- | The class of monads within which the FastCGI calls are valid.  You may wish to
 --   create your own monad implementing this class.
-class (MonadIO m) => FastCGIMonad m where
+class (MonadIO m) => MonadFastCGI m where
     -- | Returns the opaque 'FastCGIState' object representing the state of the
     --   FastCGI client.
     --   Should not be called directly by user code; exported so that
@@ -231,7 +231,7 @@ class (MonadIO m) => FastCGIMonad m where
         -> m a
 
 
-instance FastCGIMonad FastCGI where
+instance MonadFastCGI FastCGI where
     getFastCGIState = ask
     implementationThrowFastCGI exception = liftIO $ Exception.throwIO exception
     implementationCatchFastCGI action handler = do
@@ -333,7 +333,7 @@ main' = do
 --   
 --   Note that although there is no mechanism to substitute another type of monad for
 --   FastCGI, you can enter your own monad within the handler, much as you would enter
---   your own monad within IO.  You simply have to implement the 'FastCGIMonad' class.
+--   your own monad within IO.  You simply have to implement the 'MonadFastCGI' class.
 --   
 --   Any exceptions not caught within the handler are caught by 'concurrentAcceptLoop',
 --   and cause the termination of that handler, but not of the accept loop.
@@ -428,7 +428,7 @@ computeWebServerAddresses = do
                    else System.ioError error)
 
 
-validateWebServerAddress :: (FastCGIMonad m) => m Bool
+validateWebServerAddress :: (MonadFastCGI m) => m Bool
 validateWebServerAddress = do
   FastCGIState { webServerAddresses = maybeWebServerAddresses, peer = peer }
       <- getFastCGIState
@@ -707,7 +707,7 @@ parseInt string =
       else Nothing
 
 
-recvRecord :: (FastCGIMonad m) => m (Maybe Record)
+recvRecord :: (MonadFastCGI m) => m (Maybe Record)
 recvRecord = do
   FastCGIState { socket = socket } <- getFastCGIState
   byteString <- liftIO $ recvAll socket 8
@@ -741,7 +741,7 @@ recvRecord = do
     _ -> return Nothing
 
 
-sendRecord :: (FastCGIMonad m) => Record -> m ()
+sendRecord :: (MonadFastCGI m) => Record -> m ()
 sendRecord record = do
   FastCGIState { socket = socket } <- getFastCGIState
   let recordRequestIDB0 = fromIntegral $ recordRequestID record `mod` 256
@@ -816,7 +816,7 @@ takeNameValuePair byteString
 
 
 -- | Logs a message using the web server's logging facility.
-fLog :: (FastCGIMonad m) => String -> m ()
+fLog :: (MonadFastCGI m) => String -> m ()
 fLog message = do
   FastCGIState { request = maybeRequest } <- getFastCGIState
   case maybeRequest of
@@ -1098,7 +1098,7 @@ isValidInResponse header = (headerType header == ResponseHeader)
 -- | Queries the value from the web server of the CGI/1.1 request variable with the
 --   given name for this request.
 getRequestVariable
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => String -- ^ The name of the request variable to query.
     -> m (Maybe String) -- ^ The value of the request variable, if the web server
                         --   provided one.
@@ -1112,7 +1112,7 @@ getRequestVariable name = do
 -- | Returns an association list of name-value pairs of all the CGI/1.1 request
 --   variables from the web server.
 getAllRequestVariables
-    :: (FastCGIMonad m) => m [(String, String)]
+    :: (MonadFastCGI m) => m [(String, String)]
 getAllRequestVariables = do
   state <- getFastCGIState
   requestVariableMap
@@ -1122,7 +1122,7 @@ getAllRequestVariables = do
 
 -- | Queries the value from the user agent of the given HTTP/1.1 header.
 getRequestHeader
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => Header -- ^ The header to query.  Must be a request or entity header.
     -> m (Maybe String) -- ^ The value of the header, if the user agent provided one.
 getRequestHeader header = do
@@ -1134,7 +1134,7 @@ getRequestHeader header = do
 
 -- | Returns an association list of name-value pairs of all the HTTP/1.1 request or
 --   entity headers from the user agent.
-getAllRequestHeaders :: (FastCGIMonad m) => m [(Header, String)]
+getAllRequestHeaders :: (MonadFastCGI m) => m [(Header, String)]
 getAllRequestHeaders = do
   state <- getFastCGIState
   requestHeaderMap
@@ -1145,7 +1145,7 @@ getAllRequestHeaders = do
 -- | Returns a 'Cookie' object for the given name, if the user agent provided one
 --   in accordance with RFC 2109.
 getCookie
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => String -- ^ The name of the cookie to look for.
     -> m (Maybe Cookie) -- ^ The cookie, if the user agent provided it.
 getCookie name = do
@@ -1157,7 +1157,7 @@ getCookie name = do
 
 -- | Returns all 'Cookie' objects provided by the user agent in accordance 
 --   RFC 2109.
-getAllCookies :: (FastCGIMonad m) => m [Cookie]
+getAllCookies :: (MonadFastCGI m) => m [Cookie]
 getAllCookies = do
   state <- getFastCGIState
   requestCookieMap
@@ -1168,7 +1168,7 @@ getAllCookies = do
 -- | A convenience method; as 'getCookie', but returns only the value of the cookie
 --   rather than a 'Cookie' object.
 getCookieValue
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => String -- ^ The name of the cookie to look for.
     -> m (Maybe String) -- ^ The value of the cookie, if the user agent provided it.
 getCookieValue name = do
@@ -1181,37 +1181,37 @@ getCookieValue name = do
 
 
 -- | Return the document root, as provided by the web server, if it was provided.
-getDocumentRoot :: (FastCGIMonad m) => m (Maybe String)
+getDocumentRoot :: (MonadFastCGI m) => m (Maybe String)
 getDocumentRoot = do
   getRequestVariable "DOCUMENT_ROOT"
 
 
 -- | Return the gateway interface, as provided by the web server, if it was provided.
-getGatewayInterface :: (FastCGIMonad m) => m (Maybe String)
+getGatewayInterface :: (MonadFastCGI m) => m (Maybe String)
 getGatewayInterface = do
   getRequestVariable "GATEWAY_INTERFACE"
 
 
 -- | Return the path info, as provided by the web server, if it was provided.
-getPathInfo :: (FastCGIMonad m) => m (Maybe String)
+getPathInfo :: (MonadFastCGI m) => m (Maybe String)
 getPathInfo = do
   getRequestVariable "PATH_INFO"
 
 
 -- | Return the path-translated value, as provided by the web server, if it was provided.
-getPathTranslated :: (FastCGIMonad m) => m (Maybe String)
+getPathTranslated :: (MonadFastCGI m) => m (Maybe String)
 getPathTranslated = do
   getRequestVariable "PATH_TRANSLATED"
 
 
 -- | Return the query string, as provided by the web server, if it was provided.
-getQueryString :: (FastCGIMonad m) => m (Maybe String)
+getQueryString :: (MonadFastCGI m) => m (Maybe String)
 getQueryString = do
   getRequestVariable "QUERY_STRING"
 
 
 -- | Return the redirect status, as provided by the web server, if it was provided.
-getRedirectStatus :: (FastCGIMonad m) => m (Maybe Int)
+getRedirectStatus :: (MonadFastCGI m) => m (Maybe Int)
 getRedirectStatus = do
   value <- getRequestVariable "REDIRECT_STATUS"
   return $ case value of
@@ -1220,13 +1220,13 @@ getRedirectStatus = do
 
 
 -- | Return the redirect URI, as provided by the web server, if it was provided.
-getRedirectURI :: (FastCGIMonad m) => m (Maybe String)
+getRedirectURI :: (MonadFastCGI m) => m (Maybe String)
 getRedirectURI = do
   getRequestVariable "REDIRECT_URI"
 
 
 -- | Return the remote address, as provided by the web server, if it was provided.
-getRemoteAddress :: (FastCGIMonad m) => m (Maybe Network.HostAddress)
+getRemoteAddress :: (MonadFastCGI m) => m (Maybe Network.HostAddress)
 getRemoteAddress = do
   value <- getRequestVariable "REMOTE_ADDR"
   return Nothing -- TODO
@@ -1241,7 +1241,7 @@ getRemoteAddress = do
 
 
 -- | Return the remote port, as provided by the web server, if it was provided.
-getRemotePort :: (FastCGIMonad m) => m (Maybe Int)
+getRemotePort :: (MonadFastCGI m) => m (Maybe Int)
 getRemotePort = do
   value <- getRequestVariable "REMOTE_PORT"
   return $ case value of
@@ -1250,49 +1250,49 @@ getRemotePort = do
 
 
 -- | Return the remote hostname, as provided by the web server, if it was provided.
-getRemoteHost :: (FastCGIMonad m) => m (Maybe String)
+getRemoteHost :: (MonadFastCGI m) => m (Maybe String)
 getRemoteHost = do
   getRequestVariable "REMOTE_HOST"
 
 
 -- | Return the remote ident value, as provided by the web server, if it was provided.
-getRemoteIdent :: (FastCGIMonad m) => m (Maybe String)
+getRemoteIdent :: (MonadFastCGI m) => m (Maybe String)
 getRemoteIdent = do
   getRequestVariable "REMOTE_IDENT"
 
 
 -- | Return the remote user name, as provided by the web server, if it was provided.
-getRemoteUser :: (FastCGIMonad m) => m (Maybe String)
+getRemoteUser :: (MonadFastCGI m) => m (Maybe String)
 getRemoteUser = do
   getRequestVariable "REMOTE_USER"
 
 
 -- | Return the request method, as provided by the web server, if it was provided.
-getRequestMethod :: (FastCGIMonad m) => m (Maybe String)
+getRequestMethod :: (MonadFastCGI m) => m (Maybe String)
 getRequestMethod = do
   getRequestVariable "REQUEST_METHOD"
 
 
 -- | Return the request URI, as provided by the web server, if it was provided.
-getRequestURI :: (FastCGIMonad m) => m (Maybe String)
+getRequestURI :: (MonadFastCGI m) => m (Maybe String)
 getRequestURI = do
   getRequestVariable "REQUEST_URI"
 
 
 -- | Return the script filename, as provided by the web server, if it was provided.
-getScriptFilename :: (FastCGIMonad m) => m (Maybe String)
+getScriptFilename :: (MonadFastCGI m) => m (Maybe String)
 getScriptFilename = do
   getRequestVariable "SCRIPT_FILENAME"
 
 
 -- | Return the script name, as provided by the web server, if it was provided.
-getScriptName :: (FastCGIMonad m) => m (Maybe String)
+getScriptName :: (MonadFastCGI m) => m (Maybe String)
 getScriptName = do
   getRequestVariable "SCRIPT_NAME"
 
 
 -- | Return the server address, as provided by the web server, if it was provided.
-getServerAddress :: (FastCGIMonad m) => m (Maybe Network.HostAddress)
+getServerAddress :: (MonadFastCGI m) => m (Maybe Network.HostAddress)
 getServerAddress = do
   value <- getRequestVariable "SERVER_ADDR"
   return Nothing -- TODO
@@ -1307,13 +1307,13 @@ getServerAddress = do
 
 
 -- | Return the server name, as provided by the web server, if it was provided.
-getServerName :: (FastCGIMonad m) => m (Maybe String)
+getServerName :: (MonadFastCGI m) => m (Maybe String)
 getServerName = do
   getRequestVariable "SERVER_NAME"
 
 
 -- | Return the server port, as provided by the web server, if it was provided.
-getServerPort :: (FastCGIMonad m) => m (Maybe Int)
+getServerPort :: (MonadFastCGI m) => m (Maybe Int)
 getServerPort = do
   value <- getRequestVariable "SERVER_PORT"
   return $ case value of
@@ -1322,26 +1322,26 @@ getServerPort = do
 
 
 -- | Return the server protocol, as provided by the web server, if it was provided.
-getServerProtocol :: (FastCGIMonad m) => m (Maybe String)
+getServerProtocol :: (MonadFastCGI m) => m (Maybe String)
 getServerProtocol = do
   getRequestVariable "SERVER_PROTOCOL"
 
 
 -- | Return the server software name and version, as provided by the web server, if
 --   it was provided.
-getServerSoftware :: (FastCGIMonad m) => m (Maybe String)
+getServerSoftware :: (MonadFastCGI m) => m (Maybe String)
 getServerSoftware = do
   getRequestVariable "SERVER_SOFTWARE"
 
 
 -- | Return the authentication type, as provided by the web server, if it was provided.
-getAuthenticationType :: (FastCGIMonad m) => m (Maybe String)
+getAuthenticationType :: (MonadFastCGI m) => m (Maybe String)
 getAuthenticationType = do
   getRequestVariable "AUTH_TYPE"
 
 
 -- | Return the content length, as provided by the web server, if it was provided.
-getContentLength :: (FastCGIMonad m) => m (Maybe Int)
+getContentLength :: (MonadFastCGI m) => m (Maybe Int)
 getContentLength = do
   value <- getRequestVariable "CONTENT_LENGTH"
   return $ case value of
@@ -1350,7 +1350,7 @@ getContentLength = do
 
 
 -- | Return the content type, as provided by the web server, if it was provided.
-getContentType :: (FastCGIMonad m) => m (Maybe String)
+getContentType :: (MonadFastCGI m) => m (Maybe String)
 getContentType = do
   getRequestVariable "CONTENT_TYPE"
 
@@ -1360,7 +1360,7 @@ getContentType = do
 --   if any.  If input has been closed, returns an empty bytestring.  If insufficient
 --   input is available, blocks until there is enough.  If output has been closed,
 --   causes an 'OutputAlreadyClosed' exception.
-fGet :: (FastCGIMonad m) => Int -> m BS.ByteString
+fGet :: (MonadFastCGI m) => Int -> m BS.ByteString
 fGet size = fGet' size False
 
 
@@ -1370,11 +1370,11 @@ fGet size = fGet' size False
 --   input is available, returns any input which is immediately available, or an empty
 --   bytestring if there is none, never blocking.  If output has been closed, causes an
 --   'OutputAlreadyClosed' exception.
-fGetNonBlocking :: (FastCGIMonad m) => Int -> m BS.ByteString
+fGetNonBlocking :: (MonadFastCGI m) => Int -> m BS.ByteString
 fGetNonBlocking size = fGet' size True
 
 
-fGet' :: (FastCGIMonad m) => Int -> Bool -> m BS.ByteString
+fGet' :: (MonadFastCGI m) => Int -> Bool -> m BS.ByteString
 fGet' size nonBlocking = do
   requireOutputNotYetClosed
   FastCGIState { request = Just request } <- getFastCGIState
@@ -1396,7 +1396,7 @@ fGet' size nonBlocking = do
 --   any.  Blocks until all input has been read.  If input has been closed, returns an
 --   empty bytestring.  If output has been closed, causes an 'OutputAlreadyClosed'
 --   exception.
-fGetContents :: (FastCGIMonad m) => m BS.ByteString
+fGetContents :: (MonadFastCGI m) => m BS.ByteString
 fGetContents = do
   requireOutputNotYetClosed
   FastCGIState { request = Just request } <- getFastCGIState
@@ -1416,7 +1416,7 @@ fGetContents = do
 -- | Returns whether the input stream of the current request potentially has data
 --   remaining, either in the buffer or yet to be read.  This is the content data of
 --   the HTTP request, if any.
-fIsReadable :: (FastCGIMonad m) => m Bool
+fIsReadable :: (MonadFastCGI m) => m Bool
 fIsReadable = do
   FastCGIState { request = Just request } <- getFastCGIState
   stdinStreamBuffer <- liftIO $ readMVar $ stdinStreamBufferMVar request
@@ -1428,7 +1428,7 @@ fIsReadable = do
       return $ (not stdinStreamClosed) && (not requestEnded)
 
 
-extendStdinStreamBufferToLength :: (FastCGIMonad m) => Int -> Bool -> m ()
+extendStdinStreamBufferToLength :: (MonadFastCGI m) => Int -> Bool -> m ()
 extendStdinStreamBufferToLength desiredLength nonBlocking = do
   FastCGIState { request = Just request } <- getFastCGIState
   stdinStreamBuffer <- liftIO $ takeMVar $ stdinStreamBufferMVar request
@@ -1468,7 +1468,7 @@ extendStdinStreamBufferToLength desiredLength nonBlocking = do
 --   response headers have already been sent, causes a 'ResponseHeadersAlreadySent'
 --   exception.
 setResponseStatus
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => Int -- ^ The HTTP/1.1 status code to set.
     -> m ()
 setResponseStatus status = do
@@ -1482,7 +1482,7 @@ setResponseStatus status = do
 -- | Returns the response status which will be or has been sent with the response
 --   headers.
 getResponseStatus
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => m Int -- ^ The HTTP/1.1 status code.
 getResponseStatus = do
   FastCGIState { request = Just request } <- getFastCGIState
@@ -1498,7 +1498,7 @@ getResponseStatus = do
 --   If a value is set for the 'HttpSetCookie' header, this overrides all cookies set
 --   for this request with 'setCookie'.
 setResponseHeader
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => Header -- ^ The header to set.  Must be a response header or an entity header.
     -> String -- ^ The value to set.
     -> m ()
@@ -1523,7 +1523,7 @@ setResponseHeader header value = do
 --   Does not prevent the 'HttpSetCookie' header from being sent if cookies have been
 --   set for this request with 'setCookie'.
 unsetResponseHeader
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => Header -- ^ The header to unset.  Must be a response header or an entity header.
     -> m ()
 unsetResponseHeader header = do
@@ -1543,7 +1543,7 @@ unsetResponseHeader header = do
 --   header, ie, is not valid as part of a response, causes a 'NotAResponseHeader'
 --   exception.
 getResponseHeader
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => Header -- ^ The header to query.  Must be a response header or an entity
               --   header.
     -> m (Maybe String) -- ^ The value of the queried header.
@@ -1568,7 +1568,7 @@ getResponseHeader header = do
 --   If the name is not a possible name for a cookie, causes a 'CookieNameInvalid'
 --   exception.
 setCookie
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => Cookie -- ^ The cookie to set.
     -> m ()
 setCookie cookie = do
@@ -1591,7 +1591,7 @@ setCookie cookie = do
 --   If the name is not a possible name for a cookie, causes a 'CookieNameInvalid'
 --   exception.
 unsetCookie
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => String -- ^ The name of the cookie to unset.
     -> m ()
 unsetCookie name = do
@@ -1660,7 +1660,7 @@ mkUnsetCookie name  = Cookie {
                             }
 
 
-requireValidCookieName :: (FastCGIMonad m) => String -> m ()
+requireValidCookieName :: (MonadFastCGI m) => String -> m ()
 requireValidCookieName name = do
   let valid = (length name > 0) && (all validCharacter name)
       validCharacter c = (ord c > 0) && (ord c < 128)
@@ -1697,7 +1697,7 @@ instance Exception.Exception FastCGIException
 --   bookmarks or incoming links to be updated.  If the response headers have already
 --   been sent, causes a 'ResponseHeadersAlreadySent' exception.
 permanentRedirect
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => String -- ^ The URL to redirect to, as a string.
     -> m ()
 permanentRedirect url = do
@@ -1711,7 +1711,7 @@ permanentRedirect url = do
 --   do not cause bookmarks or incoming links to be updated.  If the response headers
 --   have already been sent, causes a 'ResponseHeadersAlreadySent' exception.
 seeOtherRedirect
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => String -- ^ The URL to redirect to, as a string.
     -> m ()
 seeOtherRedirect url = do
@@ -1722,7 +1722,7 @@ seeOtherRedirect url = do
 -- | Ensures that the response headers have been sent.  If they are already sent, does
 --   nothing.  If output has already been closed, causes an 'OutputAlreadyClosed'
 --   exception.
-sendResponseHeaders :: (FastCGIMonad m) => m ()
+sendResponseHeaders :: (MonadFastCGI m) => m ()
 sendResponseHeaders = do
   requireOutputNotYetClosed
   FastCGIState { request = Just request } <- getFastCGIState
@@ -1754,7 +1754,7 @@ sendResponseHeaders = do
 
 
 -- | Returns whether the response headers have been sent.
-responseHeadersSent :: (FastCGIMonad m) => m Bool
+responseHeadersSent :: (MonadFastCGI m) => m Bool
 responseHeadersSent = do
   FastCGIState { request = Just request } <- getFastCGIState
   liftIO $ readMVar $ responseHeadersSentMVar request
@@ -1763,7 +1763,7 @@ responseHeadersSent = do
 -- | Sends data.  This is the content data of the HTTP response.  If the response
 --   headers have not been sent, first sends them.  If output has already been closed,
 --   causes an 'OutputAlreadyClosed' exception.
-fPut :: (FastCGIMonad m) => BS.ByteString -> m ()
+fPut :: (MonadFastCGI m) => BS.ByteString -> m ()
 fPut buffer = do
   requireOutputNotYetClosed
   sendResponseHeaders
@@ -1774,7 +1774,7 @@ fPut buffer = do
 -- | Sends text, encoded as UTF-8.  This is the content data of the HTTP response.
 --   if the response headers have not been sent, first sends them.  If output has
 --   already been closed, causes an 'OutputAlreadyClosed' exception.
-fPutStr :: (FastCGIMonad m) => String -> m ()
+fPutStr :: (MonadFastCGI m) => String -> m ()
 fPutStr string = fPut $ BS.fromString string
 
 
@@ -1784,7 +1784,7 @@ fPutStr string = fPut $ BS.fromString string
 --   may be useful within a handler if the handler wishes to return results and then
 --   perform time-consuming computations before exiting.  If output has already been
 --   closed, causes an 'OutputAlreadyClosed' exception.
-fCloseOutput :: (FastCGIMonad m) => m ()
+fCloseOutput :: (MonadFastCGI m) => m ()
 fCloseOutput = do
   requireOutputNotYetClosed
   terminateRequest
@@ -1792,14 +1792,14 @@ fCloseOutput = do
 
 -- | Returns whether it is possible to write more data; ie, whether output has not
 --   yet been closed as by 'fCloseOutput'.
-fIsWritable :: (FastCGIMonad m) => m Bool
+fIsWritable :: (MonadFastCGI m) => m Bool
 fIsWritable = do
   FastCGIState { request = Just request } <- getFastCGIState
   requestEnded <- liftIO $ readMVar $ requestEndedMVar request
   return $ not requestEnded
 
 
-sendBuffer :: (FastCGIMonad m) => BS.ByteString -> m ()
+sendBuffer :: (MonadFastCGI m) => BS.ByteString -> m ()
 sendBuffer buffer = do
   let length = BS.length buffer
       lengthThisRecord = minimum [length, 0xFFFF]
@@ -1819,7 +1819,7 @@ sendBuffer buffer = do
     else return ()
 
 
-terminateRequest :: (FastCGIMonad m) => m ()
+terminateRequest :: (MonadFastCGI m) => m ()
 terminateRequest = do
   FastCGIState { request = Just request } <- getFastCGIState
   sendRecord $ Record {
@@ -1829,7 +1829,7 @@ terminateRequest = do
                    }
 
 
-requireResponseHeadersNotYetSent :: (FastCGIMonad m) => m ()
+requireResponseHeadersNotYetSent :: (MonadFastCGI m) => m ()
 requireResponseHeadersNotYetSent = do
   FastCGIState { request = Just request } <- getFastCGIState
   alreadySent <- liftIO $ readMVar $ responseHeadersSentMVar request
@@ -1839,7 +1839,7 @@ requireResponseHeadersNotYetSent = do
     else return ()
 
 
-requireOutputNotYetClosed :: (FastCGIMonad m) => m ()
+requireOutputNotYetClosed :: (MonadFastCGI m) => m ()
 requireOutputNotYetClosed = do
   FastCGIState { request = Just request } <- getFastCGIState
   requestEnded <- liftIO $ readMVar $ requestEndedMVar request
@@ -1849,9 +1849,9 @@ requireOutputNotYetClosed = do
     else return ()
 
 
--- | Throw an exception in any 'FastCGIMonad' monad.
+-- | Throw an exception in any 'MonadFastCGI' monad.
 fThrow
-    :: (Exception.Exception e, FastCGIMonad m)
+    :: (Exception.Exception e, MonadFastCGI m)
     => e -- ^ The exception to throw.
     -> m a
 fThrow exception = implementationThrowFastCGI exception
@@ -1861,7 +1861,7 @@ fThrow exception = implementationThrowFastCGI exception
 --   'Control.Exception.catch'.  The type of exception to catch is determined by the
 --   type signature of the handler.
 fCatch
-    :: (Exception.Exception e, FastCGIMonad m)
+    :: (Exception.Exception e, MonadFastCGI m)
     => m a -- ^ The action to run with the exception handler binding in scope.
     -> (e -> m a) -- ^ The exception handler to bind.
     -> m a
@@ -1870,7 +1870,7 @@ fCatch action handler = implementationCatchFastCGI action handler
 
 -- | Block exceptions within an action, as per the discussion in 'Control.Exception'.
 fBlock
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => m a -- ^ The action to run with exceptions blocked.
     -> m a
 fBlock action = implementationBlockFastCGI action
@@ -1878,7 +1878,7 @@ fBlock action = implementationBlockFastCGI action
 
 -- | Unblock exceptions within an action, as per the discussion in 'Control.Exception'.
 fUnblock
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => m a -- ^ The action to run with exceptions unblocked.
     -> m a
 fUnblock action = implementationUnblockFastCGI action
@@ -1889,7 +1889,7 @@ fUnblock action = implementationUnblockFastCGI action
 --   'fBracket' will re-raise it after running the release function, having the effect
 --   of propagating the exception further up the call stack.
 fBracket
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => m a -- ^ The action to acquire the resource.
     -> (a -> m b) -- ^ The action to release the resource.
     -> (a -> m c) -- ^ The action to perform using the resource.
@@ -1909,7 +1909,7 @@ fBracket acquire release perform = do
 --   exception is raised, the cleanup action will be invoked after the main action is
 --   performed.
 fFinally
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => m a -- ^ The action to perform.
     -> m b -- ^ The cleanup action.
     -> m a -- ^ The return value of the perform-action.
@@ -1923,7 +1923,7 @@ fFinally perform cleanup = do
 -- | Perform an action.  If any exceptions of the appropriate type occur within the
 --   action, return 'Left' @exception@; otherwise, return 'Right' @result@.
 fTry
-    :: (Exception.Exception e, FastCGIMonad m)
+    :: (Exception.Exception e, MonadFastCGI m)
     => m a -- ^ The action to perform.
     -> m (Either e a)
 fTry action = do
@@ -1935,7 +1935,7 @@ fTry action = do
 
 -- | As 'fCatch', but with the arguments in the other order.
 fHandle
-    :: (Exception.Exception e, FastCGIMonad m)
+    :: (Exception.Exception e, MonadFastCGI m)
     => (e -> m a) -- ^ The exception handler to bind.
     -> m a -- ^ The action to run with the exception handler binding in scope.
     -> m a
@@ -1949,7 +1949,7 @@ fHandle handler action = fCatch action handler
 --   further up the call stack.  If no exception is raised, the cleanup action will not
 --   be invoked.
 fOnException
-    :: (FastCGIMonad m)
+    :: (MonadFastCGI m)
     => m a -- ^ The action to perform.
     -> m b -- ^ The cleanup action.
     -> m a -- ^ The return value of the perform-action.
