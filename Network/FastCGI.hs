@@ -198,7 +198,8 @@ type FastCGI = ReaderT FastCGIState IO
 class (MonadIO m) => MonadFastCGI m where
     -- | Returns the opaque 'FastCGIState' object representing the state of the
     --   FastCGI client.
-    --   Should not be called directly by user code; exported so that
+    --   Should not be called directly by user code, except implementations of
+    --   'MonadFastCGI'; exported so that
     --   user monads can implement the interface.
     getFastCGIState
         :: m FastCGIState
