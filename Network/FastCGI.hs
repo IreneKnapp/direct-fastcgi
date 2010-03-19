@@ -198,12 +198,53 @@ type FastCGI = ReaderT FastCGIState IO
 class (MonadIO m) => FastCGIMonad m where
     -- | Returns the opaque 'FastCGIState' object representing the state of the
     --   FastCGI client.
+    --   Should not be called directly by user code; exported so that
+    --   user monads can implement the interface.
     getFastCGIState
         :: m FastCGIState
+    -- | Throws an exception in the monad.
+    --   Should not be called directly by user code; exported so that
+    --   user monads can implement the interface.  See 'fThrow'.
+    implementationThrowFastCGI
+        :: (Exception.Exception e)
+        => e -- ^ The exception to throw
+        -> m a
+    -- | Perform an action in the monad, with a given exception-handler action bound.
+    --   Should not be called directly by user code; exported so that
+    --   user monads can implement the interface.  See 'fCatch'.
+    implementationCatchFastCGI
+        :: (Exception.Exception e)
+        => m a -- ^ The action to run with the exception handler binding in scope.
+        -> (e -> m a) -- ^ The exception handler to bind.
+        -> m a
+    -- | Block exceptions within an action.
+    --   Should not be called directly by user code; exported so that
+    --   user monads can implement the interface.  See 'fBlock'.
+    implementationBlockFastCGI
+        :: m a -- ^ The action to run with exceptions blocked.
+        -> m a
+    -- | Unblock exceptions within an action.
+    --   Should not be called directly by user code; exported so that
+    --   user monads can implement the interface.  See 'fUnblock'.
+    implementationUnblockFastCGI
+        :: m a -- ^ The action to run with exceptions unblocked.
+        -> m a
 
 
 instance FastCGIMonad FastCGI where
     getFastCGIState = ask
+    implementationThrowFastCGI exception = liftIO $ Exception.throwIO exception
+    implementationCatchFastCGI action handler = do
+      state <- getFastCGIState
+      liftIO $ Exception.catch (runReaderT action state)
+                               (\exception -> do
+                                  runReaderT (handler exception) state)
+    implementationBlockFastCGI action = do
+      state <- getFastCGIState
+      liftIO $ Exception.block (runReaderT action state)
+    implementationUnblockFastCGI action = do
+      state <- getFastCGIState
+      liftIO $ Exception.unblock (runReaderT action state)
 
 
 data Record = Record {
@@ -1808,49 +1849,39 @@ requireOutputNotYetClosed = do
     else return ()
 
 
--- BIG BIG TODO TODO TODO re-generalize all the exception functions to FastCGIMonad.
-
 -- | Throw an exception in any 'FastCGIMonad' monad.
 fThrow
-    :: (Exception.Exception e)
+    :: (Exception.Exception e, FastCGIMonad m)
     => e -- ^ The exception to throw.
-    -> FastCGI a
-fThrow exception = liftIO $ Exception.throwIO exception
+    -> m a
+fThrow exception = implementationThrowFastCGI exception
 
 
 -- | Perform an action, with a given exception-handler action bound.  See
 --   'Control.Exception.catch'.  The type of exception to catch is determined by the
 --   type signature of the handler.
 fCatch
-    :: (Exception.Exception e)
-    => FastCGI a -- ^ The action to run with the exception handler binding in scope.
-    -> (e -> FastCGI a) -- ^ The exception handler to bind.
-    -> FastCGI a
-fCatch action handler = do
-  state <- getFastCGIState
-  liftIO $ Exception.catch (runReaderT action state)
-                           (\exception -> do
-                              runReaderT (handler exception) state)
+    :: (Exception.Exception e, FastCGIMonad m)
+    => m a -- ^ The action to run with the exception handler binding in scope.
+    -> (e -> m a) -- ^ The exception handler to bind.
+    -> m a
+fCatch action handler = implementationCatchFastCGI action handler
 
 
 -- | Block exceptions within an action, as per the discussion in 'Control.Exception'.
 fBlock
-    ::
-    FastCGI a -- ^ The action to run with exceptions blocked.
-    -> FastCGI a
-fBlock action = do
-  state <- getFastCGIState
-  liftIO $ Exception.block (runReaderT action state)
+    :: (FastCGIMonad m)
+    => m a -- ^ The action to run with exceptions blocked.
+    -> m a
+fBlock action = implementationBlockFastCGI action
 
 
 -- | Unblock exceptions within an action, as per the discussion in 'Control.Exception'.
 fUnblock
-    ::
-    FastCGI a -- ^ The action to run with exceptions unblocked.
-    -> FastCGI a
-fUnblock action = do
-  state <- getFastCGIState
-  liftIO $ Exception.unblock (runReaderT action state)
+    :: (FastCGIMonad m)
+    => m a -- ^ The action to run with exceptions unblocked.
+    -> m a
+fUnblock action = implementationUnblockFastCGI action
 
 
 -- | Acquire a resource, perform computation with it, and release it; see the description
@@ -1858,11 +1889,11 @@ fUnblock action = do
 --   'fBracket' will re-raise it after running the release function, having the effect
 --   of propagating the exception further up the call stack.
 fBracket
-    ::
-    FastCGI a -- ^ The action to acquire the resource.
-    -> (a -> FastCGI b) -- ^ The action to release the resource.
-    -> (a -> FastCGI c) -- ^ The action to perform using the resource.
-    -> FastCGI c -- ^ The return value of the perform-action.
+    :: (FastCGIMonad m)
+    => m a -- ^ The action to acquire the resource.
+    -> (a -> m b) -- ^ The action to release the resource.
+    -> (a -> m c) -- ^ The action to perform using the resource.
+    -> m c -- ^ The return value of the perform-action.
 fBracket acquire release perform = do
   fBlock (do
            resource <- acquire
@@ -1878,10 +1909,10 @@ fBracket acquire release perform = do
 --   exception is raised, the cleanup action will be invoked after the main action is
 --   performed.
 fFinally
-    ::
-    FastCGI a -- ^ The action to perform.
-    -> FastCGI b -- ^ The cleanup action.
-    -> FastCGI a -- ^ The return value of the perform-action.
+    :: (FastCGIMonad m)
+    => m a -- ^ The action to perform.
+    -> m b -- ^ The cleanup action.
+    -> m a -- ^ The return value of the perform-action.
 fFinally perform cleanup = do
   fBlock (do
            result <- fUnblock perform `fOnException` cleanup
@@ -1892,9 +1923,9 @@ fFinally perform cleanup = do
 -- | Perform an action.  If any exceptions of the appropriate type occur within the
 --   action, return 'Left' @exception@; otherwise, return 'Right' @result@.
 fTry
-    :: (Exception.Exception e)
-    => FastCGI a -- ^ The action to perform.
-    -> FastCGI (Either e a)
+    :: (Exception.Exception e, FastCGIMonad m)
+    => m a -- ^ The action to perform.
+    -> m (Either e a)
 fTry action = do
   fCatch (do
            result <- action
@@ -1904,10 +1935,10 @@ fTry action = do
 
 -- | As 'fCatch', but with the arguments in the other order.
 fHandle
-    :: (Exception.Exception e)
-    => (e -> FastCGI a) -- ^ The exception handler to bind.
-    -> FastCGI a -- ^ The action to run with the exception handler binding in scope.
-    -> FastCGI a
+    :: (Exception.Exception e, FastCGIMonad m)
+    => (e -> m a) -- ^ The exception handler to bind.
+    -> m a -- ^ The action to run with the exception handler binding in scope.
+    -> m a
 fHandle handler action = fCatch action handler
 
 
@@ -1918,10 +1949,10 @@ fHandle handler action = fCatch action handler
 --   further up the call stack.  If no exception is raised, the cleanup action will not
 --   be invoked.
 fOnException
-    ::
-    FastCGI a -- ^ The action to perform.
-    -> FastCGI b -- ^ The cleanup action.
-    -> FastCGI a -- ^ The return value of the perform-action.
+    :: (FastCGIMonad m)
+    => m a -- ^ The action to perform.
+    -> m b -- ^ The cleanup action.
+    -> m a -- ^ The return value of the perform-action.
 fOnException action cleanup = do
   fCatch action
          (\exception -> do
