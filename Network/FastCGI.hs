@@ -647,7 +647,9 @@ printCookies cookies =
             = intercalate ";" $ map printNameValuePair $ nameValuePairs cookie
         printNameValuePair (name, Nothing) = name
         printNameValuePair (name, Just value)
-            = name ++ "=\"" ++ escape value ++ "\""
+            = if isValidCookieToken value
+                then name ++ "=" ++ value
+                else name ++ "=\"" ++ escape value ++ "\""
         escape "" = ""
         escape ('\\':rest) = "\\\\" ++ escape rest
         escape ('\"':rest) = "\\\"" ++ escape rest
@@ -1632,12 +1634,16 @@ mkUnsetCookie name  = Cookie {
 
 requireValidCookieName :: (MonadFastCGI m) => String -> m ()
 requireValidCookieName name = do
-  let valid = (length name > 0) && (all validCharacter name)
-      validCharacter c = (ord c > 0) && (ord c < 128)
-                         && (not $ elem c "()<>@,;:\\\"/[]?={} \t")
-  if not valid
+  if not $ isValidCookieToken name
     then fThrow $ CookieNameInvalid name
     else return ()
+
+
+isValidCookieToken :: String -> Bool
+isValidCookieToken token =
+    let validCharacter c = (ord c > 0) && (ord c < 128)
+                           && (not $ elem c "()<>@,;:\\\"/[]?={} \t")
+    in (length token > 0) && (all validCharacter token)
 
 
 -- | An exception originating within the FastCGI infrastructure or the web server.
