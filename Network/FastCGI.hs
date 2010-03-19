@@ -664,7 +664,7 @@ printCookies cookies =
                                       Just maxAge -> [("Max-Age", Just $ show maxAge)])
                                 ++ (case cookiePath cookie of
                                       Nothing -> []
-                                      Just path -> [("Path", Just $ show path)])
+                                      Just path -> [("Path", Just $ path)])
                                 ++ (case cookieSecure cookie of
                                       False -> []
                                       True -> [("Secure", Nothing)])
