@@ -1,6 +1,5 @@
 {-# LANGUAGE TypeSynonymInstances, DeriveDataTypeable #-}
-module Main (
-             main,
+module Network.FastCGI (
              -- * The monad
              FastCGI,
              MonadFastCGI,
@@ -292,35 +291,6 @@ instance Enum RecordType where
     fromEnum GetValuesRecord = 9
     fromEnum GetValuesResultRecord = 10
     fromEnum UnknownTypeRecord = 11
-
-
-main :: IO ()
-main = do
-  acceptLoop forkIO main'
-
-
-main' :: FastCGI ()
-main' = do
-  Just queryString <- getRequestVariable "QUERY_STRING"
-  case queryString of
-    "/set" -> setCookie $ mkSimpleCookie "flooze" "fibble"
-    "/unset" -> unsetCookie "flooze"
-    _ -> return ()
-  fPutStr "xyzzy<br />\n"
-  maybeSessionID <- getCookieValue "session"
-  case maybeSessionID of
-    Nothing -> fPutStr $ "No cookie."
-    Just sessionID -> fPutStr $ "<tt>'" ++ sessionID ++ "'</tt>"
-  fPutStr "<br />\n"
-  maybeFlooze <- getCookieValue "flooze"
-  case maybeFlooze of
-    Nothing -> fPutStr $ "No cookie."
-    Just flooze -> fPutStr $ "<tt>'" ++ flooze ++ "'</tt>"
-  fPutStr "<br />\n"
-  variables <- getAllRequestVariables
-  fPutStr "<table>"
-  flip mapM variables (\(name, value) -> fPutStr $ "<tr><td>" ++ (show name) ++ "</td><td>" ++ (show value) ++ "</td></tr>")
-  fPutStr "</table>"
 
 
 -- | Takes a forking primitive, such as 'forkIO' or 'forkOS', and a handler, and
