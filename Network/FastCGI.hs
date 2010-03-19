@@ -149,7 +149,7 @@ data Request = Request {
       responseStatusMVar :: MVar Int,
       responseHeaderMapMVar :: MVar (Map.Map Header String),
       responseHeadersSentMVar :: MVar Bool,
-      responseCookiesMVar :: MVar [Cookie]
+      responseCookieMapMVar :: MVar (Map.Map String Cookie)
     }
 
 
@@ -236,11 +236,21 @@ main = do
 main' :: FastCGI ()
 main' = do
   Just queryString <- getRequestVariable "QUERY_STRING"
-  fLog queryString
-  if queryString /= "/foo"
-    then permanentRedirect "/foo"
-    else do
-      fPutStr "xyzzy"
+  case queryString of
+    "/set" -> setCookie $ mkSimpleCookie "flooze" "fibble"
+    "/unset" -> unsetCookie "flooze"
+    _ -> return ()
+  fPutStr "xyzzy<br />\n"
+  maybeSessionID <- getCookieValue "session"
+  case maybeSessionID of
+    Nothing -> fPutStr $ "No cookie."
+    Just sessionID -> fPutStr $ "<tt>'" ++ sessionID ++ "'</tt>"
+  fPutStr "<br />\n"
+  maybeFlooze <- getCookieValue "flooze"
+  case maybeFlooze of
+    Nothing -> fPutStr $ "No cookie."
+    Just flooze -> fPutStr $ "<tt>'" ++ flooze ++ "'</tt>"
+  fPutStr "<br />\n"
 
 
 -- | Takes a forking primitive, such as 'forkIO' or 'forkOS', and a handler, and
@@ -391,7 +401,7 @@ outsideRequestLoop fork handler = do
           responseHeaderMapMVar
               <- liftIO $ newMVar $ Map.fromList [(HttpContentType, "text/html")]
           responseHeadersSentMVar <- liftIO $ newMVar $ False
-          responseCookiesMVar <- liftIO $ newMVar $ []
+          responseCookieMapMVar <- liftIO $ newMVar $ Map.empty
           let requestChannelMap' = Map.insert (recordRequestID record)
                                               requestChannel
                                               requestChannelMap
@@ -408,7 +418,7 @@ outsideRequestLoop fork handler = do
                                 responseStatusMVar = responseStatusMVar,
                                 responseHeaderMapMVar = responseHeaderMapMVar,
                                 responseHeadersSentMVar = responseHeadersSentMVar,
-                                responseCookiesMVar = responseCookiesMVar
+                                responseCookieMapMVar = responseCookieMapMVar
                               }
               state' = state { request = Just request }
           liftIO $ putMVar (requestChannelMapMVar state) requestChannelMap'
@@ -585,6 +595,37 @@ parseCookies value =
                                                          _ -> (Nothing, pairs')
                                 in (maybePath, maybeDomain, pairs'')
   in takeCookie pairs'
+
+
+printCookies :: [Cookie] -> String
+printCookies cookies =
+    let printCookie cookie
+            = intercalate ";" $ map printNameValuePair $ nameValuePairs cookie
+        printNameValuePair (name, Nothing) = name
+        printNameValuePair (name, Just value)
+            = name ++ "=\"" ++ escape value ++ "\""
+        escape "" = ""
+        escape ('\\':rest) = "\\\\" ++ escape rest
+        escape ('\"':rest) = "\\\"" ++ escape rest
+        escape (c:rest) = [c] ++ escape rest
+        nameValuePairs cookie = [(cookieName cookie, Just $ cookieValue cookie)]
+                                ++ (case cookieComment cookie of
+                                      Nothing -> []
+                                      Just comment -> [("Comment", Just comment)])
+                                ++ (case cookieDomain cookie of
+                                      Nothing -> []
+                                      Just domain -> [("Domain", Just domain)])
+                                ++ (case cookieMaxAge cookie of
+                                      Nothing -> []
+                                      Just maxAge -> [("Max-Age", Just $ show maxAge)])
+                                ++ (case cookiePath cookie of
+                                      Nothing -> []
+                                      Just path -> [("Path", Just $ show path)])
+                                ++ (case cookieSecure cookie of
+                                      False -> []
+                                      True -> [("Secure", Nothing)])
+                                ++ [("Version", Just $ show $ cookieVersion cookie)]
+    in intercalate "," $ map printCookie cookies
 
 
 parseInt :: String -> Maybe Int
@@ -1225,7 +1266,7 @@ setResponseHeader header value = do
       responseHeaderMap <- liftIO $ takeMVar $ responseHeaderMapMVar request
       let responseHeaderMap' = Map.insert header value responseHeaderMap
       liftIO $ putMVar (responseHeaderMapMVar request) responseHeaderMap'
-    else -- fThrow $ NotAResponseHeader header
+    else -- fThrow $ NotAResponseHeader header TODO
         return ()
 
 
@@ -1249,7 +1290,7 @@ unsetResponseHeader header = do
       responseHeaderMap <- liftIO $ takeMVar $ responseHeaderMapMVar request
       let responseHeaderMap' = Map.delete header responseHeaderMap
       liftIO $ putMVar (responseHeaderMapMVar request) responseHeaderMap'
-    else -- fThrow $ NotAResponseHeader header
+    else -- fThrow $ NotAResponseHeader header TODO
         return ()
 
 
@@ -1269,7 +1310,7 @@ getResponseHeader header = do
       FastCGIState { request = Just request } <- getFastCGIState
       responseHeaderMap <- liftIO $ readMVar $ responseHeaderMapMVar request
       return $ Map.lookup header responseHeaderMap
-    else -- fThrow $ NotAResponseHeader header
+    else -- fThrow $ NotAResponseHeader header TODO
         return Nothing
 
 
@@ -1280,14 +1321,21 @@ getResponseHeader header = do
 --   this function has no effect.
 --   If the response headers have already been sent,
 --   causes a 'ResponseHeadersAlreadySent' exception.
+--   If the name is not a possible name for a cookie, causes a 'CookieNameInvalid'
+--   exception.
 setCookie
     :: (FastCGIMonad m)
     => Cookie -- ^ The cookie to set.
     -> m ()
 setCookie cookie = do
   requireResponseHeadersNotYetSent
-  return ()
-  -- TODO
+  requireValidCookieName $ cookieName cookie
+  fLog $ show cookie
+  FastCGIState { request = Just request } <- getFastCGIState
+  responseCookieMap <- liftIO $ takeMVar $ responseCookieMapMVar request
+  let responseCookieMap' = Map.insert (cookieName cookie) cookie responseCookieMap
+  fLog $ show responseCookieMap'
+  liftIO $ putMVar (responseCookieMapMVar request) responseCookieMap'
 
 
 -- | Causes the user agent to unset any cookie applicable to this page with the
@@ -1296,14 +1344,19 @@ setCookie cookie = do
 --   this function has no effect.
 --   If the response headers have already been sent,
 --   causes a 'ResponseHeadersAlreadySent' exception.
+--   If the name is not a possible name for a cookie, causes a 'CookieNameInvalid'
+--   exception.
 unsetCookie
     :: (FastCGIMonad m)
     => String -- ^ The name of the cookie to unset.
     -> m ()
 unsetCookie name = do
   requireResponseHeadersNotYetSent
-  return ()
-  -- TODO
+  requireValidCookieName name
+  FastCGIState { request = Just request } <- getFastCGIState
+  responseCookieMap <- liftIO $ takeMVar $ responseCookieMapMVar request
+  let responseCookieMap' = Map.insert name (mkUnsetCookie name) responseCookieMap
+  liftIO $ putMVar (responseCookieMapMVar request) responseCookieMap'
 
 
 -- | Constructs a cookie with the given name and value.  Version is set to 1;
@@ -1350,6 +1403,30 @@ mkCookie name value maybePath maybeDomain maybeMaxAge secure
       }
 
 
+mkUnsetCookie :: String -> Cookie
+mkUnsetCookie name  = Cookie {
+                              cookieName = name,
+                              cookieValue = "",
+                              cookieVersion = 1,
+                              cookiePath = Nothing,
+                              cookieDomain = Nothing,
+                              cookieMaxAge = Just 0,
+                              cookieSecure = False,
+                              cookieComment = Nothing
+                            }
+
+
+requireValidCookieName :: (FastCGIMonad m) => String -> m ()
+requireValidCookieName name = do
+  let valid = (length name > 0) && (all validCharacter name)
+      validCharacter c = (ord c > 0) && (ord c < 128)
+                         && (not $ elem c "()<>@,;:\\\"/[]?={} \t")
+  if not valid
+    then -- fThrow $ CookieNameInvalid name TODO
+         return ()
+    else return ()
+
+
 -- | An exception originating within the FastCGI infrastructure or the web server.
 data FastCGIException
     = ResponseHeadersAlreadySent
@@ -1361,6 +1438,9 @@ data FastCGIException
     | NotAResponseHeader Header
       -- ^ An exception thrown by operations which are given a header that does not
       --   meet their requirement of being valid in a response.
+    | CookieNameInvalid String
+      -- ^ An exception thrown by operations which are given cookie names that do not
+      --   meet the appropriate syntax requirements.
       deriving (Show, Typeable)
 
 
@@ -1407,10 +1487,18 @@ sendResponseHeaders = do
     then do
       responseStatus <- liftIO $ readMVar $ responseStatusMVar request
       responseHeaderMap <- liftIO $ readMVar $ responseHeaderMapMVar request
+      responseCookieMap <- liftIO $ readMVar $ responseCookieMapMVar request
+      fLog $ show responseCookieMap
       let nameValuePairs = [("Status", (show responseStatus))]
                            ++ (map (\key -> (fromHeader key,
                                              fromJust $ Map.lookup key responseHeaderMap))
                                    $ Map.keys responseHeaderMap)
+                           ++ (if (isNothing $ Map.lookup HttpSetCookie
+                                                          responseHeaderMap)
+                                  && (length (Map.elems responseCookieMap) > 0)
+                                 then [("Set-Cookie", setCookieValue)]
+                                 else [])
+          setCookieValue = printCookies $ Map.elems responseCookieMap
           bytestrings
               = (map (\(name, value) -> BS.fromString $ name ++ ": " ++ value ++ "\r\n")
                      nameValuePairs)
@@ -1462,8 +1550,9 @@ fCloseOutput = do
 --   yet been closed as by 'fCloseOutput'.
 fIsWritable :: (FastCGIMonad m) => m Bool
 fIsWritable = do
-  return True
-  -- TODO
+  FastCGIState { request = Just request } <- getFastCGIState
+  requestEnded <- liftIO $ readMVar $ requestEndedMVar request
+  return $ not requestEnded
 
 
 sendBuffer :: (FastCGIMonad m) => BS.ByteString -> m ()
