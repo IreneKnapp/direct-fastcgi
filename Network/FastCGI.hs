@@ -1230,15 +1230,15 @@ getRedirectURI = do
 getRemoteAddress :: (MonadFastCGI m) => m (Maybe Network.HostAddress)
 getRemoteAddress = do
   value <- getRequestVariable "REMOTE_ADDR"
-  return Nothing -- TODO
-{-
-  fCatch (do
-           value' <- liftIO $ inet_addr value
-           return $ Just value')
-         (\exception -> do
-            return (exception :: UserError)
-            return Nothing)
--}
+  case value of
+    Nothing -> return Nothing
+    Just value -> do
+      fCatch (do
+               value' <- liftIO $ Network.inet_addr value
+               return $ Just value')
+             (\exception -> do
+                return (exception :: System.IOError)
+                return Nothing)
 
 
 -- | Return the remote port, as provided by the web server, if it was provided.
@@ -1296,15 +1296,15 @@ getScriptName = do
 getServerAddress :: (MonadFastCGI m) => m (Maybe Network.HostAddress)
 getServerAddress = do
   value <- getRequestVariable "SERVER_ADDR"
-  return Nothing -- TODO
-{-
-  fCatch (do
-           value' <- liftIO $ inet_addr value
-           return $ Just value')
-         (\exception -> do
-            return (exception :: UserError)
-            return Nothing)
--}
+  case value of
+    Nothing -> return Nothing
+    Just value -> do
+      fCatch (do
+               value' <- liftIO $ Network.inet_addr value
+               return $ Just value')
+             (\exception -> do
+                return (exception :: System.IOError)
+                return Nothing)
 
 
 -- | Return the server name, as provided by the web server, if it was provided.
@@ -1511,8 +1511,7 @@ setResponseHeader header value = do
       responseHeaderMap <- liftIO $ takeMVar $ responseHeaderMapMVar request
       let responseHeaderMap' = Map.insert header value responseHeaderMap
       liftIO $ putMVar (responseHeaderMapMVar request) responseHeaderMap'
-    else -- fThrow $ NotAResponseHeader header TODO
-        return ()
+    else fThrow $ NotAResponseHeader header
 
 
 -- | Causes the given 'HttpHeader' response header not to be sent, overriding any value
@@ -1535,8 +1534,7 @@ unsetResponseHeader header = do
       responseHeaderMap <- liftIO $ takeMVar $ responseHeaderMapMVar request
       let responseHeaderMap' = Map.delete header responseHeaderMap
       liftIO $ putMVar (responseHeaderMapMVar request) responseHeaderMap'
-    else -- fThrow $ NotAResponseHeader header TODO
-        return ()
+    else fThrow $ NotAResponseHeader header
 
 
 -- | Returns the value of the given header which will be or has been sent with the
@@ -1555,8 +1553,7 @@ getResponseHeader header = do
       FastCGIState { request = Just request } <- getFastCGIState
       responseHeaderMap <- liftIO $ readMVar $ responseHeaderMapMVar request
       return $ Map.lookup header responseHeaderMap
-    else -- fThrow $ NotAResponseHeader header TODO
-        return Nothing
+    else fThrow $ NotAResponseHeader header
 
 
 -- | Causes the user agent to record the given cookie and send it back with future
@@ -1667,8 +1664,7 @@ requireValidCookieName name = do
       validCharacter c = (ord c > 0) && (ord c < 128)
                          && (not $ elem c "()<>@,;:\\\"/[]?={} \t")
   if not valid
-    then -- fThrow $ CookieNameInvalid name TODO
-         return ()
+    then fThrow $ CookieNameInvalid name
     else return ()
 
 
@@ -1835,8 +1831,7 @@ requireResponseHeadersNotYetSent = do
   FastCGIState { request = Just request } <- getFastCGIState
   alreadySent <- liftIO $ readMVar $ responseHeadersSentMVar request
   if alreadySent
-    then -- fThrow ResponseHeadersAlreadySent TODO
-        return ()
+    then fThrow ResponseHeadersAlreadySent
     else return ()
 
 
@@ -1845,8 +1840,7 @@ requireOutputNotYetClosed = do
   FastCGIState { request = Just request } <- getFastCGIState
   requestEnded <- liftIO $ readMVar $ requestEndedMVar request
   if requestEnded
-    then -- fThrow OutputAlreadyClosed TODO
-        return ()
+    then fThrow OutputAlreadyClosed
     else return ()
 
 
