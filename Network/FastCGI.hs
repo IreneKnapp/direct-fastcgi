@@ -19,7 +19,7 @@ module Main (
              --   not defined by the specification, but often seen in the wild.
              --   Furthermore, it is also common for user agents to make their own
              --   extensions to the HTTP/1.1 set of defined headers.  Therefore, there
-             --   are two levels of call available; defined variables and headers may
+             --   are two levels of call available.  Defined variables and headers may
              --   be interrogated directly, and in addition, there are higher-level
              --   calls which give convenient names and types to the same information.
              --   
@@ -34,6 +34,30 @@ module Main (
              getCookie,
              getAllCookies,
              getCookieValue,
+             getDocumentRoot,
+             getGatewayInterface,
+             getPathInfo,
+             getPathTranslated,
+             getQueryString,
+             getRedirectStatus,
+             getRedirectURI,
+             getRemoteAddress,
+             getRemotePort,
+             getRemoteHost,
+             getRemoteIdent,
+             getRemoteUser,
+             getRequestMethod,
+             getRequestURI,
+             getScriptFilename,
+             getScriptName,
+             getServerAddress,
+             getServerName,
+             getServerPort,
+             getServerProtocol,
+             getServerSoftware,
+             getAuthenticationType,
+             getContentLength,
+             getContentType,
              
              -- * Request content data
              -- | At the moment the handler is invoked, all request headers have been
@@ -251,6 +275,10 @@ main' = do
     Nothing -> fPutStr $ "No cookie."
     Just flooze -> fPutStr $ "<tt>'" ++ flooze ++ "'</tt>"
   fPutStr "<br />\n"
+  variables <- getAllRequestVariables
+  fPutStr "<table>"
+  flip mapM variables (\(name, value) -> fPutStr $ "<tr><td>" ++ (show name) ++ "</td><td>" ++ (show value) ++ "</td></tr>")
+  fPutStr "</table>"
 
 
 -- | Takes a forking primitive, such as 'forkIO' or 'forkOS', and a handler, and
@@ -1109,6 +1137,181 @@ getCookieValue name = do
   return $ case Map.lookup name requestCookieMap of
     Nothing -> Nothing
     Just cookie -> Just $ cookieValue cookie
+
+
+-- | Return the document root, as provided by the web server, if it was provided.
+getDocumentRoot :: (FastCGIMonad m) => m (Maybe String)
+getDocumentRoot = do
+  getRequestVariable "DOCUMENT_ROOT"
+
+
+-- | Return the gateway interface, as provided by the web server, if it was provided.
+getGatewayInterface :: (FastCGIMonad m) => m (Maybe String)
+getGatewayInterface = do
+  getRequestVariable "GATEWAY_INTERFACE"
+
+
+-- | Return the path info, as provided by the web server, if it was provided.
+getPathInfo :: (FastCGIMonad m) => m (Maybe String)
+getPathInfo = do
+  getRequestVariable "PATH_INFO"
+
+
+-- | Return the path-translated value, as provided by the web server, if it was provided.
+getPathTranslated :: (FastCGIMonad m) => m (Maybe String)
+getPathTranslated = do
+  getRequestVariable "PATH_TRANSLATED"
+
+
+-- | Return the query string, as provided by the web server, if it was provided.
+getQueryString :: (FastCGIMonad m) => m (Maybe String)
+getQueryString = do
+  getRequestVariable "QUERY_STRING"
+
+
+-- | Return the redirect status, as provided by the web server, if it was provided.
+getRedirectStatus :: (FastCGIMonad m) => m (Maybe Int)
+getRedirectStatus = do
+  value <- getRequestVariable "REDIRECT_STATUS"
+  return $ case value of
+    Nothing -> Nothing
+    Just value -> parseInt value
+
+
+-- | Return the redirect URI, as provided by the web server, if it was provided.
+getRedirectURI :: (FastCGIMonad m) => m (Maybe String)
+getRedirectURI = do
+  getRequestVariable "REDIRECT_URI"
+
+
+-- | Return the remote address, as provided by the web server, if it was provided.
+getRemoteAddress :: (FastCGIMonad m) => m (Maybe Network.HostAddress)
+getRemoteAddress = do
+  value <- getRequestVariable "REMOTE_ADDR"
+  return Nothing -- TODO
+{-
+  fCatch (do
+           value' <- liftIO $ inet_addr value
+           return $ Just value')
+         (\exception -> do
+            return (exception :: UserError)
+            return Nothing)
+-}
+
+
+-- | Return the remote port, as provided by the web server, if it was provided.
+getRemotePort :: (FastCGIMonad m) => m (Maybe Int)
+getRemotePort = do
+  value <- getRequestVariable "REMOTE_PORT"
+  return $ case value of
+    Nothing -> Nothing
+    Just value -> parseInt value
+
+
+-- | Return the remote hostname, as provided by the web server, if it was provided.
+getRemoteHost :: (FastCGIMonad m) => m (Maybe String)
+getRemoteHost = do
+  getRequestVariable "REMOTE_HOST"
+
+
+-- | Return the remote ident value, as provided by the web server, if it was provided.
+getRemoteIdent :: (FastCGIMonad m) => m (Maybe String)
+getRemoteIdent = do
+  getRequestVariable "REMOTE_IDENT"
+
+
+-- | Return the remote user name, as provided by the web server, if it was provided.
+getRemoteUser :: (FastCGIMonad m) => m (Maybe String)
+getRemoteUser = do
+  getRequestVariable "REMOTE_USER"
+
+
+-- | Return the request method, as provided by the web server, if it was provided.
+getRequestMethod :: (FastCGIMonad m) => m (Maybe String)
+getRequestMethod = do
+  getRequestVariable "REQUEST_METHOD"
+
+
+-- | Return the request URI, as provided by the web server, if it was provided.
+getRequestURI :: (FastCGIMonad m) => m (Maybe String)
+getRequestURI = do
+  getRequestVariable "REQUEST_URI"
+
+
+-- | Return the script filename, as provided by the web server, if it was provided.
+getScriptFilename :: (FastCGIMonad m) => m (Maybe String)
+getScriptFilename = do
+  getRequestVariable "SCRIPT_FILENAME"
+
+
+-- | Return the script name, as provided by the web server, if it was provided.
+getScriptName :: (FastCGIMonad m) => m (Maybe String)
+getScriptName = do
+  getRequestVariable "SCRIPT_NAME"
+
+
+-- | Return the server address, as provided by the web server, if it was provided.
+getServerAddress :: (FastCGIMonad m) => m (Maybe Network.HostAddress)
+getServerAddress = do
+  value <- getRequestVariable "SERVER_ADDR"
+  return Nothing -- TODO
+{-
+  fCatch (do
+           value' <- liftIO $ inet_addr value
+           return $ Just value')
+         (\exception -> do
+            return (exception :: UserError)
+            return Nothing)
+-}
+
+
+-- | Return the server name, as provided by the web server, if it was provided.
+getServerName :: (FastCGIMonad m) => m (Maybe String)
+getServerName = do
+  getRequestVariable "SERVER_NAME"
+
+
+-- | Return the server port, as provided by the web server, if it was provided.
+getServerPort :: (FastCGIMonad m) => m (Maybe Int)
+getServerPort = do
+  value <- getRequestVariable "SERVER_PORT"
+  return $ case value of
+    Nothing -> Nothing
+    Just value -> parseInt value
+
+
+-- | Return the server protocol, as provided by the web server, if it was provided.
+getServerProtocol :: (FastCGIMonad m) => m (Maybe String)
+getServerProtocol = do
+  getRequestVariable "SERVER_PROTOCOL"
+
+
+-- | Return the server software name and version, as provided by the web server, if
+--   it was provided.
+getServerSoftware :: (FastCGIMonad m) => m (Maybe String)
+getServerSoftware = do
+  getRequestVariable "SERVER_SOFTWARE"
+
+
+-- | Return the authentication type, as provided by the web server, if it was provided.
+getAuthenticationType :: (FastCGIMonad m) => m (Maybe String)
+getAuthenticationType = do
+  getRequestVariable "AUTH_TYPE"
+
+
+-- | Return the content length, as provided by the web server, if it was provided.
+getContentLength :: (FastCGIMonad m) => m (Maybe Int)
+getContentLength = do
+  value <- getRequestVariable "CONTENT_LENGTH"
+  return $ case value of
+    Nothing -> Nothing
+    Just value -> parseInt value
+
+
+-- | Return the content type, as provided by the web server, if it was provided.
+getContentType :: (FastCGIMonad m) => m (Maybe String)
+getContentType = do
+  getRequestVariable "CONTENT_TYPE"
 
 
 -- | Reads up to a specified amount of data from the input stream of the current request,
