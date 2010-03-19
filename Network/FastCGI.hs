@@ -1701,7 +1701,6 @@ sendResponseHeaders = do
       responseStatus <- liftIO $ readMVar $ responseStatusMVar request
       responseHeaderMap <- liftIO $ readMVar $ responseHeaderMapMVar request
       responseCookieMap <- liftIO $ readMVar $ responseCookieMapMVar request
-      fLog $ show responseCookieMap
       let nameValuePairs = [("Status", (show responseStatus))]
                            ++ (map (\key -> (fromHeader key,
                                              fromJust $ Map.lookup key responseHeaderMap))
