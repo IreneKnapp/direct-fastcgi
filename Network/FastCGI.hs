@@ -1546,11 +1546,9 @@ setCookie
 setCookie cookie = do
   requireResponseHeadersNotYetSent
   requireValidCookieName $ cookieName cookie
-  fLog $ show cookie
   FastCGIState { request = Just request } <- getFastCGIState
   responseCookieMap <- liftIO $ takeMVar $ responseCookieMapMVar request
   let responseCookieMap' = Map.insert (cookieName cookie) cookie responseCookieMap
-  fLog $ show responseCookieMap'
   liftIO $ putMVar (responseCookieMapMVar request) responseCookieMap'
 
 
