@@ -470,7 +470,8 @@ outsideRequestLoop fork handler = do
             Exception.catch (runReaderT (insideRequestLoop handler) state')
                             (\error -> flip runReaderT state' $ do
                                fLog $ "Uncaught exception: "
-                                      ++ (show (error :: Exception.SomeException)))
+                                      ++ (show (error :: Exception.SomeException))
+                               fCloseOutput)
           return ()
         OtherRecord unknownCode -> do
           sendRecord $ Record {
