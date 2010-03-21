@@ -649,7 +649,12 @@ printCookies cookies =
         printNameValuePair (name, Just value)
             = if isValidCookieToken value
                 then name ++ "=" ++ value
+                else fThrow $ CookieNameInvalid value
+        {- Safari doesn't like this.
+            = if isValidCookieToken value
+                then name ++ "=" ++ value
                 else name ++ "=\"" ++ escape value ++ "\""
+         -}
         escape "" = ""
         escape ('\\':rest) = "\\\\" ++ escape rest
         escape ('\"':rest) = "\\\"" ++ escape rest
