@@ -649,7 +649,8 @@ printCookies cookies =
         printNameValuePair (name, Just value)
             = if isValidCookieToken value
                 then name ++ "=" ++ value
-                else fThrow $ CookieNameInvalid value
+                else error $ "Cookie attribute value couldn't be encoded: "
+                           ++ (show value)
         {- Safari doesn't like this.
             = if isValidCookieToken value
                 then name ++ "=" ++ value
