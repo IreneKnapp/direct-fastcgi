@@ -647,10 +647,7 @@ printCookies cookies =
             = intercalate ";" $ map printNameValuePair $ nameValuePairs cookie
         printNameValuePair (name, Nothing) = name
         printNameValuePair (name, Just value)
-            = if isValidCookieToken value
-                then name ++ "=" ++ value
-                else error $ "Cookie attribute value couldn't be encoded: "
-                           ++ (show value)
+            = name ++ "=" ++ value
         {- Safari doesn't like this.
             = if isValidCookieToken value
                 then name ++ "=" ++ value
