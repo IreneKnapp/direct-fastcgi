@@ -1757,7 +1757,8 @@ fPutStr string = fPut $ BS.fromString string
 
 
 -- | Informs the web server and the user agent that the request has completed.  As
---   a side-effect, any unread input is discarded and no more can be read.  This is
+--   side-effects, the response headers are sent if they have not yet been, and
+--   any unread input is discarded and no more can be read.  This is
 --   implicitly called, if it has not already been, after the handler returns; it
 --   may be useful within a handler if the handler wishes to return results and then
 --   perform time-consuming computations before exiting.  If output has already been
@@ -1765,6 +1766,7 @@ fPutStr string = fPut $ BS.fromString string
 fCloseOutput :: (MonadFastCGI m) => m ()
 fCloseOutput = do
   requireOutputNotYetClosed
+  sendResponseHeaders
   terminateRequest
 
 
