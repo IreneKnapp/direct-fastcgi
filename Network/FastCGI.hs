@@ -1,4 +1,4 @@
-{-# LANGUAGE TypeSynonymInstances, DeriveDataTypeable #-}
+{-# LANGUAGE TypeSynonymInstances, FlexibleInstances, DeriveDataTypeable #-}
 module Network.FastCGI (
              -- * The monad
              FastCGI,
