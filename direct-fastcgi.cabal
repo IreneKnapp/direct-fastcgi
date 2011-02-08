@@ -9,6 +9,7 @@ author: Dan Knapp
 maintainer: dankna@gmail.com
 homepage: http://dankna.com/software/
 bug-reports: http://dankna.com/issues/create/
+source-repository: http://dankna.com/software/darcs/direct-fastcgi/
 category: Network
 synopsis: Native implementation of the FastCGI protocol.
 description:
